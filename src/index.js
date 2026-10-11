@@ -2104,6 +2104,8 @@ async function scanHistory(uid, targetRepo=null) {
     });
     historyState.status = "error";
     historyState.error = "上一次扫描进程已中断，已自动恢复。";
+    // 旧版本可能没有续扫标记；运行状态过期时按中断的历史扫描处理，从断点继续向更早消息读取。
+    historyState.resumeOlderHistory = Number(historyState.lastMessageId || 0) > 0;
     historyState.finishedAt = Date.now();
     db.settings.historyScan = historyState;
     saveDb();
