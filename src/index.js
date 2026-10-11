@@ -5022,29 +5022,35 @@ function latestResourcePage(requestedOffset=0) {
 }
 
 async function sendDirectoryBatch(token, chatId, items) {
-  const valid=(Array.isArray(items)?items:[]).filter(item=>{
-    const currentRepo=repo();
-    const ok=Boolean(currentRepo&&String(currentRepo.chatId||"")===String(item?.chatId||""));
-    if(!ok) console.warn("⏭️ 文件夹批量发送：资源仓库已解绑/已切换，跳过旧资源 chat=",String(item?.chatId||""),"resource=",String(item?.messageId||""));
-    return ok;
-  });
-  if(!valid.length)return {sent:0,sentItems:[]};
+  // 文件夹资源可能来自旧仓库或迁移后的来源。不要仅因它与当前绑定仓库
+  // 不同就静默跳过；按每条资源记录的 chatId/messageId 尝试发送。
+  const valid=(Array.isArray(items)?items:[]).filter(item=>
+    item && item.chatId!==undefined && item.chatId!==null &&
+    String(item.chatId).trim() && Number(item.messageId)>0
+  );
+  if(!valid.length) {
+    console.warn("⚠️ 文件夹批量发送：文件夹内有记录，但没有有效的源仓库 Chat ID/消息 ID。");
+    return {sent:0,sentItems:[]};
+  }
   try {
     const result=await sendResourceAlbum(token,chatId,valid);
-    return {sent:Number(result?.sent||0),sentItems:Array.isArray(result?.sentItems)?result.sentItems:[]};
+    const sent=Number(result?.sent||0);
+    if(!sent) console.warn("⚠️ 文件夹批量发送：有效记录存在，但没有资源发送成功。",{
+      count:valid.length,
+      sources:[...new Set(valid.map(x=>String(x.chatId)))],
+      firstMessages:valid.slice(0,5).map(x=>Number(x.messageId))
+    });
+    return {sent,sentItems:Array.isArray(result?.sentItems)?result.sentItems:[]};
   } catch(e) {
     const desc=String(e?.telegramDescription||e?.message||e||"");
     console.error("DIRECTORY SEND:",desc);
     if(/bot was kicked|kicked from the supergroup|bot is not a member|forbidden:.*(?:chat|group|channel)|机器人被踢|禁止访问/i.test(desc)) {
       const currentRepo=repo(),badChat=String(currentRepo?.chatId||"").trim();
-      if(currentRepo&&badChat) {
-        const removed=(Array.isArray(db.resources)?db.resources:[]).filter(x=>String(x?.chatId||"")===badChat);
-        db.resources=db.resources.filter(x=>String(x?.chatId||"")!==badChat);
-        db.settings.repository=null;
-        db.settings.resourceSources=Array.isArray(db.settings.resourceSources)?db.settings.resourceSources.filter(x=>String(x?.chatId||"")!==badChat):[];
-        saveDb();
-        console.warn("🧹 文件夹批量发送：仓库访问失效，已自动解绑并清理资源 chat=",badChat,"removed=",removed.length);
-      }
+      // 不因单个旧来源不可访问就删除资源或解绑当前仓库。
+      console.warn("⚠️ 文件夹发送遇到仓库权限错误；保留文件夹和资源记录供管理员检查。",{
+        currentRepo:badChat,
+        sourceChats:[...new Set(valid.map(x=>String(x.chatId)))]
+      });
     }
     return {sent:0,sentItems:[]};
   }
