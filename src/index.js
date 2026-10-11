@@ -2115,7 +2115,7 @@ async function scanHistory(uid, targetRepo=null) {
   // 只有历史读取超时中断的任务，才从旧消息断点继续；普通完成后的扫描仍按增量模式处理。
   const resumeOlderHistory=Boolean(historyState.resumeOlderHistory && previousCheckpoint>0);
   const startedAt=Date.now();
-  db.settings.historyScan={status:"running",scanned:0,indexed:0,startedAt,finishedAt:null,error:"",lastMessageId:previousCheckpoint};
+  db.settings.historyScan={status:"running",scanned:0,indexed:0,startedAt,finishedAt:null,error:"",lastMessageId:previousCheckpoint,resumeOlderHistory};
   saveDb();
 
   let progressMessage = null;
