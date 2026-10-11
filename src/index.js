@@ -1575,7 +1575,14 @@ function flushLocalDb() {
   }
 }
 const db = loadDb();
-await initializeMySQL(db);
+const mysqlReadyAtStartup = await initializeMySQL(db);
+if (mysqlReadyAtStartup) {
+  // MySQL 恢复完成后，立即把完整状态落到本地 JSON/CSV/备份。
+  // 否则服务器上的 database.json 可能一直保留旧的空数据。
+  console.log("📦 MySQL启动恢复结果：资源=" + (db.resources?.length || 0) + "，目录=" + (db.directories?.length || 0));
+  saveDb({immediate:true});
+  console.log("✅ MySQL恢复状态已同步到本地数据库");
+}
 
 let gracefulStopping=false;
 async function gracefulShutdown(signal){
