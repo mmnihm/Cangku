@@ -1575,7 +1575,26 @@ function flushLocalDb() {
   }
 }
 const db = loadDb();
-await initializeMySQL(db);
+console.log("📂 当前数据库文件:", DATA_FILE);
+const mysqlReadyAtStartup = await initializeMySQL(db);
+console.log(
+  "🧪 启动恢复检查:",
+  "file=" + DATA_FILE,
+  "resources=" + (db.resources?.length || 0),
+  "directories=" + (db.directories?.length || 0)
+);
+if (mysqlReadyAtStartup) {
+  const resourceCount = Array.isArray(db.resources) ? db.resources.length : 0;
+  const directoryCount = Array.isArray(db.directories) ? db.directories.length : 0;
+  if (resourceCount > 0 || directoryCount > 0) {
+    // MySQL 恢复后只保存非空状态，避免连接/恢复异常时用空数据覆盖本地数据库。
+    console.log("📦 MySQL启动恢复结果：资源=" + resourceCount + "，目录=" + directoryCount);
+    saveDb({immediate:true});
+    console.log("✅ MySQL恢复状态已同步到:", DATA_FILE);
+  } else {
+    console.error("⚠️ MySQL启动恢复结果为空，跳过本地保存以保护现有数据。文件:", DATA_FILE);
+  }
+}
 
 let gracefulStopping=false;
 async function gracefulShutdown(signal){

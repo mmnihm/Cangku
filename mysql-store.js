@@ -220,18 +220,43 @@ export async function initializeMySQL(db) {
       Object.assign(db,merged);
     }
 
-    const [fr]=await pool.query("SELECT data FROM folders WHERE status <> 'deleted'");
-    const [rr]=await pool.query("SELECT data FROM resources WHERE status <> 'deleted'");
-    const fm=new Map((Array.isArray(db.directories)?db.directories:[]).map(x=>[String(x?.id||""),x]));
+    // MySQL 关系表优先：JSON data 用于补充扩展字段，结构化列负责权威 ID/名称/文件夹关联。
+    // 即使旧快照中的 directoryId 过期，也以 resources.folder_id 为准，避免目录内容显示不全。
+    const [fr]=await pool.query("SELECT id,name,parent_id,sort_order,status,data,created_at,updated_at FROM folders WHERE status <> 'deleted'");
+    const [rr]=await pool.query("SELECT id,resource_key,folder_id,chat_id,message_id,title,caption,file_type,file_id,telegram_url,downloads,status,data,created_at,updated_at FROM resources WHERE status <> 'deleted'");
+    const fm=new Map((Array.isArray(db.directories)?db.directories:[]).map(x=>[String(x?.id||""),x]).filter(([id])=>id));
     for(const row of fr) {
-      const x=parseJson(row.data);
-      if(x?.id && !fm.has(String(x.id))) fm.set(String(x.id),x);
+      const raw=parseJson(row.data,{}) || {};
+      const x={
+        ...raw,
+        id:String(row.id),
+        name:String(row.name ?? raw.name ?? ""),
+        parentId:row.parent_id==null ? null : String(row.parent_id),
+        sortOrder:Number(row.sort_order ?? raw.sortOrder ?? 0),
+        status:String(row.status || raw.status || "active"),
+        createdAt:Number(row.created_at || raw.createdAt || Date.now()),
+        updatedAt:Number(row.updated_at || raw.updatedAt || Date.now())
+      };
+      if(x.id && x.name) fm.set(x.id,x);
     }
     db.directories=[...fm.values()];
-    const rm=new Map((Array.isArray(db.resources)?db.resources:[]).map(x=>[resourceKey(x),x]));
+    const rm=new Map((Array.isArray(db.resources)?db.resources:[]).map(x=>[resourceKey(x),x]).filter(([key])=>key!==":"));
     for(const row of rr) {
-      const x=parseJson(row.data);
-      if(x?.chatId && x?.messageId && !rm.has(resourceKey(x))) rm.set(resourceKey(x),x);
+      const raw=parseJson(row.data,{}) || {};
+      const x={
+        ...raw,
+        chatId:String(row.chat_id ?? raw.chatId ?? ""),
+        messageId:Number(row.message_id ?? raw.messageId ?? 0),
+        directoryId:row.folder_id!=null ? (fm.has(String(row.folder_id)) ? String(row.folder_id) : null) : (raw.directoryId!=null && fm.has(String(raw.directoryId)) ? String(raw.directoryId) : null),
+        title:row.title ?? raw.title ?? "",
+        caption:row.caption ?? raw.caption ?? "",
+        fileType:row.file_type ?? raw.fileType ?? "",
+        fileId:row.file_id ?? raw.fileId ?? "",
+        downloads:Number(row.downloads ?? raw.downloads ?? 0),
+        status:String(row.status || raw.status || "active"),
+        date:Number(row.created_at || raw.date || raw.createdAt || Date.now())
+      };
+      if(x.chatId && x.messageId) rm.set(resourceKey(x),x);
     }
     db.resources=[...rm.values()];
 
