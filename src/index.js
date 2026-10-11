@@ -2179,6 +2179,7 @@ async function scanHistory(uid, targetRepo=null) {
     console.log("🔎 HISTORY SCAN: repository located, starting history iteration");
     let scanned = 0, indexed = 0, boundary = previousCheckpoint;
     let lastProgressAt = Date.now();
+    let lastMessageAt = Date.now();
     console.log("🔎 HISTORY SCAN: iterMessages 开始，checkpoint=", previousCheckpoint);
     const iteratorOptions = resumeOlderHistory
       ? {limit:undefined,offsetId:previousCheckpoint}
@@ -2186,24 +2187,27 @@ async function scanHistory(uid, targetRepo=null) {
     console.log("🔎 HISTORY SCAN: mode=",resumeOlderHistory?"resume-older":"incremental-or-full","checkpoint=",previousCheckpoint);
     const historyIterator = client.iterMessages(entity,iteratorOptions)[Symbol.asyncIterator]();
     while (true) {
-      // Telegram 历史读取若长时间没有返回下一条消息，不能无限停在“扫描中”。
-      // 超时会走统一错误处理并保留最近断点，管理员可再次启动续扫。
       let iteratorTimeout;
       let next;
       try {
         next = await Promise.race([
           historyIterator.next(),
-          new Promise((_, reject) => {
-            iteratorTimeout = setTimeout(() => reject(new Error("Telegram 历史消息读取连续 180 秒无响应；扫描已停止并保留断点，请重新启动扫描续扫。")), 180000);
+          new Promise(resolve => {
+            iteratorTimeout = setTimeout(() => resolve({timeout:true}), 45000);
           })
         ]);
       } finally {
         if (iteratorTimeout) clearTimeout(iteratorTimeout);
       }
+      if (next?.timeout) {
+        console.warn("⚠️ HISTORY SCAN 45 秒没有新消息，按扫描结束处理 scanned=", scanned);
+        break;
+      }
       if (next.done) break;
       const message = next.value;
       const messageId=Number(message?.id||0);
       if (!resumeOlderHistory && previousCheckpoint > 0 && messageId > 0 && messageId <= previousCheckpoint) break;
+      lastMessageAt = Date.now();
       scanned++;
       if (indexHistoryMessage(message,r.chatId)) indexed++;
       if (messageId > 0) boundary=messageId;
@@ -2215,14 +2219,16 @@ async function scanHistory(uid, targetRepo=null) {
       }
     }
 
+    await updateProgress(scanned,indexed,boundary,true);
     db.resources=db.resources.slice(0,MAX_RESOURCES);
-    // 不等待数千条 Google Sheets/Baserow 备份逐条写完才报告扫描完成。
-    // 本地资源索引先完成；备份队列在后台继续处理，避免扫描进度卡在最后一步。
     if (GOOGLE_SHEETS_CREDENTIAL && GOOGLE_SHEETS_ID) {
       console.log("📊 HISTORY SCAN: 本地索引已完成，备份写入队列继续在后台处理。");
     }
     db.settings.historyScan={status:"completed",scanned,indexed,startedAt,finishedAt:Date.now(),error:"",lastMessageId:boundary,resumeOlderHistory:false};
     saveDb();
+    waitBaserowSyncQueue().catch(e=>console.warn("⚠️ 扫描后的表格同步继续后台处理:", String(e?.message||e)));
+    saveDb();
+    waitBaserowSyncQueue().catch(e=>console.warn("⚠️ 扫描后的表格同步继续后台处理:", String(e?.message||e)));
 
     const doneText =
       "✅ <b>历史资源扫描完成</b>\\n"+
