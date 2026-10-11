@@ -2123,6 +2123,8 @@ async function scanHistory(uid, targetRepo=null) {
     });
     historyState.status = "error";
     historyState.error = "上一次扫描进程已中断，已自动恢复。";
+    // 旧版本可能没有续扫标记；运行状态过期时按中断的历史扫描处理，从断点继续向更早消息读取。
+    historyState.resumeOlderHistory = Number(historyState.lastMessageId || 0) > 0;
     historyState.finishedAt = Date.now();
     db.settings.historyScan = historyState;
     saveDb();
@@ -2131,8 +2133,10 @@ async function scanHistory(uid, targetRepo=null) {
   if (!r) return send(TOKEN,uid,"❌ <b>没有可扫描的资源仓库</b>\\n\\n请先绑定仓库，或从「🔄 迁移仓库」指定旧仓库。",adminMenu());
 
   const previousCheckpoint=Number(db.settings.historyScan.lastMessageId||0);
+  // 只有历史读取超时中断的任务，才从旧消息断点继续；普通完成后的扫描仍按增量模式处理。
+  const resumeOlderHistory=Boolean(historyState.resumeOlderHistory && previousCheckpoint>0);
   const startedAt=Date.now();
-  db.settings.historyScan={status:"running",scanned:0,indexed:0,startedAt,finishedAt:null,error:"",lastMessageId:previousCheckpoint};
+  db.settings.historyScan={status:"running",scanned:0,indexed:0,startedAt,finishedAt:null,error:"",lastMessageId:previousCheckpoint,resumeOlderHistory};
   saveDb();
 
   let progressMessage = null;
@@ -2194,10 +2198,35 @@ async function scanHistory(uid, targetRepo=null) {
     console.log("🔎 HISTORY SCAN: repository located, starting history iteration");
     let scanned = 0, indexed = 0, boundary = previousCheckpoint;
     let lastProgressAt = Date.now();
+    let lastMessageAt = Date.now();
     console.log("🔎 HISTORY SCAN: iterMessages 开始，checkpoint=", previousCheckpoint);
-    for await (const message of client.iterMessages(entity,{limit:undefined})) {
+    const iteratorOptions = resumeOlderHistory
+      ? {limit:undefined,offsetId:previousCheckpoint}
+      : {limit:undefined};
+    console.log("🔎 HISTORY SCAN: mode=",resumeOlderHistory?"resume-older":"incremental-or-full","checkpoint=",previousCheckpoint);
+    const historyIterator = client.iterMessages(entity,iteratorOptions)[Symbol.asyncIterator]();
+    while (true) {
+      let iteratorTimeout;
+      let next;
+      try {
+        next = await Promise.race([
+          historyIterator.next(),
+          new Promise(resolve => {
+            iteratorTimeout = setTimeout(() => resolve({timeout:true}), 45000);
+          })
+        ]);
+      } finally {
+        if (iteratorTimeout) clearTimeout(iteratorTimeout);
+      }
+      if (next?.timeout) {
+        console.warn("⚠️ HISTORY SCAN 45 秒没有新消息，按扫描结束处理 scanned=", scanned);
+        break;
+      }
+      if (next.done) break;
+      const message = next.value;
       const messageId=Number(message?.id||0);
-      if (previousCheckpoint > 0 && messageId > 0 && messageId <= previousCheckpoint) break;
+      if (!resumeOlderHistory && previousCheckpoint > 0 && messageId > 0 && messageId <= previousCheckpoint) break;
+      lastMessageAt = Date.now();
       scanned++;
       if (indexHistoryMessage(message,r.chatId)) indexed++;
       if (messageId > 0) boundary=messageId;
@@ -2209,10 +2238,16 @@ async function scanHistory(uid, targetRepo=null) {
       }
     }
 
+    await updateProgress(scanned,indexed,boundary,true);
     db.resources=db.resources.slice(0,MAX_RESOURCES);
-    await waitBaserowSyncQueue();
-    db.settings.historyScan={status:"completed",scanned,indexed,startedAt,finishedAt:Date.now(),error:"",lastMessageId:boundary};
+    if (GOOGLE_SHEETS_CREDENTIAL && GOOGLE_SHEETS_ID) {
+      console.log("📊 HISTORY SCAN: 本地索引已完成，备份写入队列继续在后台处理。");
+    }
+    db.settings.historyScan={status:"completed",scanned,indexed,startedAt,finishedAt:Date.now(),error:"",lastMessageId:boundary,resumeOlderHistory:false};
     saveDb();
+    waitBaserowSyncQueue().catch(e=>console.warn("⚠️ 扫描后的表格同步继续后台处理:", String(e?.message||e)));
+    saveDb();
+    waitBaserowSyncQueue().catch(e=>console.warn("⚠️ 扫描后的表格同步继续后台处理:", String(e?.message||e)));
 
     const doneText =
       "✅ <b>历史资源扫描完成</b>\\n"+
@@ -2240,6 +2275,10 @@ async function scanHistory(uid, targetRepo=null) {
   } catch(e) {
     db.settings.historyScan.status="error";
     db.settings.historyScan.error=e.message;
+    if(String(e?.message||"").includes("Telegram 历史消息读取连续 180 秒无响应")) {
+      db.settings.historyScan.resumeOlderHistory=true;
+      db.settings.historyScan.lastMessageId=Number(db.settings.historyScan.lastMessageId||0);
+    }
     db.settings.historyScan.finishedAt=Date.now();
     saveDb();
     console.error("❌ HISTORY SCAN:",e);
@@ -4165,11 +4204,18 @@ function userHomeInlineKeyboard() {
     [{text:"🎟️ 兑换码",callback_data:"user:redeem"},{text:"💬 联系客服",callback_data:"support:start"}]
   ]}};
 }
+function userHomeReplyKeyboard() {
+  return {reply_markup:{keyboard:[
+    ["📂 资源目录","🔎 搜索资源"],
+    ["🎲 随机获取","🆕 最新资源"],
+    ["🎟️ 兑换码","💬 联系客服"]
+  ],resize_keyboard:true,is_persistent:true}};
+}
 function userMenu() {
-  return userHomeInlineKeyboard();
+  return userHomeReplyKeyboard();
 }
 function childMenu() {
-  return userHomeInlineKeyboard();
+  return userHomeReplyKeyboard();
 }
 function userHomeText(uid) {
   const groupMember = cachedRequiredGroupMembership(uid)===true;
@@ -5830,12 +5876,27 @@ async function deliver(token,chatId,userId,items,sourceToken=TOKEN,options={}) {
     ? "⚠️ <b>"+modeLabel+"结果</b>"+pageInfo+"\\n✅ 成功：<b>"+ok+"</b> 个\\n❌ 失败：<b>"+fail+"</b> 个\\n\\n<i>失败资源未计入成功数量；如需可稍后重新获取。</i>"+inviteText
     : "✅ <b>"+modeLabel+"完成</b>"+pageInfo+"\\n成功发送：<b>"+ok+"</b> 个"+inviteText;
 
-  // 无论本批是否有失败，都必须保留“再来一组”按钮。
-  // 自定义“获取资源后提示”直接放进最后的汇总消息，按钮始终挂在最下面。
+  // 保留原有内联按钮及回调数据，但将按钮放到本批最后一条资源消息上。
+  // 汇总提示只说明发送结果，不另外改变按钮文字或操作。
   const extraMessage = postResourceMessage();
-  const finalSummary = extraMessage ? summary+"\n\n"+extraMessage : summary;
-  await sendHtml(token,chatId,finalSummary,{...(options.mode?batchNavigation(options.mode,options.offset||0,options.total||requestedCount,requestedCount):navigation),...(albumReplyId?{reply_to_message_id:albumReplyId}:{})});
-  return;
+  const finalSummary = extraMessage ? summary+"\\n\\n"+extraMessage : summary;
+  const navMarkup = options.mode
+    ? batchNavigation(options.mode,options.offset||0,options.total||requestedCount,requestedCount)
+    : navigation;
+  if(albumReplyId && navMarkup && navMarkup.reply_markup) {
+    try {
+      await tg(token,"editMessageReplyMarkup",{
+        chat_id:chatId,
+        message_id:albumReplyId,
+        reply_markup:navMarkup.reply_markup
+      });
+    } catch(e) {
+      console.warn("⚠️ 无法将批次内联按钮挂到最后一条资源消息，暂时保留原有汇总按钮：",String(e?.telegramDescription||e?.message||e));
+      await sendHtml(token,chatId,finalSummary,{...navMarkup,reply_to_message_id:albumReplyId});
+      return;
+    }
+  }
+  await sendHtml(token,chatId,finalSummary,{...(albumReplyId?{reply_to_message_id:albumReplyId}:{})});  return;
 }
 const states=new Map();
 
@@ -6336,6 +6397,15 @@ async function mainMessage(msg) {
     const store=redemptionStore(), all=Object.values(store.redemptionCodes);
     const unused=all.filter(x=>!x.usedAt&&!x.usedBy).length, used=all.length-unused;
     return sendHtml(TOKEN,uid,"<b>🎟️ 兑换码管理</b>\n━━━━━━━━━━━━━━\n\n📦 总计："+all.length+" 个\n🟢 未使用："+unused+" 个\n☑️ 已兑换："+used+" 个\n\n👇 点击下方按钮批量生成兑换码。",{reply_markup:redeemAdminInline()});
+  }
+
+  if(t==="🎟️ 兑换码" && !admin) {
+    states.set(key,{step:"redeem_code_input"});
+    return sendHtml(TOKEN,uid,"<b>🎟️ 使用兑换码</b>\n━━━━━━━━━━━━━━\n\n请发送你的兑换码。\n也可以直接发送 <code>/redeem 兑换码</code>。\n发送 /cancel 可取消。",userMenu());
+  }
+  if(t==="💬 联系客服" && !admin) {
+    supportOpenSession(TOKEN,uid);
+    return sendHtml(TOKEN,uid,"<b>💬 在线客服</b>\n━━━━━━━━━━━━━━\n\n👋 你已进入客服会话\n\n📨 直接发送问题、文字、图片、视频或文件即可。\n💬 客服回复后会自动发送给你。\n\n📌 需要结束时，点击下方「❌ 结束客服」。",supportUserKeyboard());
   }
 
   // 顶部/底部菜单必须优先于搜索、分页等旧状态；否则用户在搜索后点击目录会被当作搜索关键词。
@@ -7566,6 +7636,15 @@ async function childMessage(child,msg,token) {
     return sendHtml(token,uid,(result.ok?"<b>✅ 兑换成功</b>":"<b>❌ 兑换失败</b>")+"\n\n"+escapeHtml(result.message),childMenu());
   }
 
+  if(t==="🎟️ 兑换码" && !isAdmin(uid)) {
+    states.set(key,{step:"redeem_code_input"});
+    return sendHtml(token,uid,"<b>🎟️ 使用兑换码</b>\n━━━━━━━━━━━━━━\n\n请发送机器人发放的兑换码，或发送包含该兑换码的整段文字。\n发送 /cancel 可取消。",childMenu());
+  }
+  if(t==="💬 联系客服" && !isAdmin(uid)) {
+    supportOpenSession(token,uid);
+    return sendHtml(token,uid,"<b>💬 在线客服</b>\n━━━━━━━━━━━━━━\n\n👋 你已进入客服会话\n\n📨 直接发送问题、文字、图片、视频或文件即可。\n💬 客服回复后会自动发送给你。\n\n📌 需要结束时，点击下方「❌ 结束客服」。",supportUserKeyboard());
+  }
+
   // 上传文件最高优先级：收到媒体后直接进入批量上传队列，避免被其他状态机拦截。
   if(isAdmin(uid) && s?.step==="upload_file") {
     const handled=await receiveUploadMedia(token,uid,key,s,msg,true);
@@ -7895,13 +7974,17 @@ async function handleDirectoryCallback(token, q, child=false) {
       const key=(child ? "c:" : "m:")+uid;
       states.delete(key);
       await answer("已返回首页");
-      return safeEdit(token,{
-        chat_id:chatId,
-        message_id:messageId,
-        text:isAdmin(uid)?adminStatusText():userHomeText(uid),
-        parse_mode:"HTML",
-        reply_markup:isAdmin(uid)?adminRootInline():userHomeInlineKeyboard().reply_markup
-      });
+      if(isAdmin(uid)) {
+        return safeEdit(token,{
+          chat_id:chatId,
+          message_id:messageId,
+          text:adminStatusText(),
+          parse_mode:"HTML",
+          reply_markup:adminRootInline()
+        });
+      }
+      await safeEdit(token,{chat_id:chatId,message_id:messageId,reply_markup:{inline_keyboard:[]}}).catch(()=>{});
+      return sendHtml(token,uid,userHomeText(uid),child?childMenu():userMenu());
     }
     if(action==="clone") {
       await answer("该功能暂未开放");
