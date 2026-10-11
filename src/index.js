@@ -5323,9 +5323,10 @@ async function sendResourceAlbum(token, chatId, items, options={}) {
     } catch(e) {
       const errorText=String(e?.telegramDescription||e?.message||e||"");
       const missingOriginal=/message to copy not found|message_id_invalid|message not found/i.test(errorText);
-      // 原始仓库消息无法复制时，若仍保存可用 file_id，则尝试重新发送，不删除资源记录。
+      // 源频道权限、旧仓库迁移或原消息不可复制时，只要当前 Bot 保存了可用 file_id，
+      // 就尝试用 file_id 重新发送；不能因为 copyMessage 失败而直接把整组算作 0。
       const fallbackItems=group.length>=2?group:[item];
-      const canFallback=missingOriginal && fallbackItems.every(x=>
+      const canFallback=fallbackItems.every(x=>
         x && x.fileId && x.fileType &&
         ["photo","video","document","audio"].includes(String(x.fileType).toLowerCase())
       );
