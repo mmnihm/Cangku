@@ -6382,11 +6382,11 @@ async function mainMessage(msg) {
 
   if(t==="🎟️ 兑换码" && !admin) {
     states.set(key,{step:"redeem_code_input"});
-    return sendHtml(TOKEN,uid,"<b>🎟️ 使用兑换码</b>\\n━━━━━━━━━━━━━━\\n\\n请发送你的兑换码。\\n也可以直接发送 <code>/redeem 兑换码</code>。\\n发送 /cancel 可取消。",userMenu());
+    return sendHtml(TOKEN,uid,"<b>🎟️ 使用兑换码</b>\n━━━━━━━━━━━━━━\n\n请发送你的兑换码。\n也可以直接发送 <code>/redeem 兑换码</code>。\n发送 /cancel 可取消。",userMenu());
   }
   if(t==="💬 联系客服" && !admin) {
     supportOpenSession(TOKEN,uid);
-    return sendHtml(TOKEN,uid,"<b>💬 在线客服</b>\\n━━━━━━━━━━━━━━\\n\\n👋 你已进入客服会话\\n\\n📨 直接发送问题、文字、图片、视频或文件即可。\\n💬 客服回复后会自动发送给你。\\n\\n📌 需要结束时，点击下方「❌ 结束客服」。",supportUserKeyboard());
+    return sendHtml(TOKEN,uid,"<b>💬 在线客服</b>\n━━━━━━━━━━━━━━\n\n👋 你已进入客服会话\n\n📨 直接发送问题、文字、图片、视频或文件即可。\n💬 客服回复后会自动发送给你。\n\n📌 需要结束时，点击下方「❌ 结束客服」。",supportUserKeyboard());
   }
 
   // 顶部/底部菜单必须优先于搜索、分页等旧状态；否则用户在搜索后点击目录会被当作搜索关键词。
@@ -7615,6 +7615,15 @@ async function childMessage(child,msg,token) {
     if(!code) return sendHtml(token,uid,"<b>❌ 没有识别到兑换码</b>\n\n请确认文字中包含机器人发放的兑换码。",childMenu());
     const result=redeemCode(uid,code,msg.from,token);
     return sendHtml(token,uid,(result.ok?"<b>✅ 兑换成功</b>":"<b>❌ 兑换失败</b>")+"\n\n"+escapeHtml(result.message),childMenu());
+  }
+
+  if(t==="🎟️ 兑换码" && !isAdmin(uid)) {
+    states.set(key,{step:"redeem_code_input"});
+    return sendHtml(token,uid,"<b>🎟️ 使用兑换码</b>\n━━━━━━━━━━━━━━\n\n请发送机器人发放的兑换码，或发送包含该兑换码的整段文字。\n发送 /cancel 可取消。",childMenu());
+  }
+  if(t==="💬 联系客服" && !isAdmin(uid)) {
+    supportOpenSession(token,uid);
+    return sendHtml(token,uid,"<b>💬 在线客服</b>\n━━━━━━━━━━━━━━\n\n👋 你已进入客服会话\n\n📨 直接发送问题、文字、图片、视频或文件即可。\n💬 客服回复后会自动发送给你。\n\n📌 需要结束时，点击下方「❌ 结束客服」。",supportUserKeyboard());
   }
 
   // 上传文件最高优先级：收到媒体后直接进入批量上传队列，避免被其他状态机拦截。
