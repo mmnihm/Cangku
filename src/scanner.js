@@ -181,8 +181,20 @@ export class HistoryScanner {
       stats.lastMessageAgeMs = now - stats.lastMessageAt;
       if (force || stats.scanned !== lastEmittedScanned) {
         lastEmittedScanned = stats.scanned;
+        console.log('HISTORY SCAN: progress',
+          'scanned=', stats.scanned,
+          'resources=', stats.resources,
+          'skipped=', stats.skipped,
+          'errors=', stats.errors,
+          'checkpoint=', stats.lastMessageId,
+          'elapsedMs=', now - startedAt);
         this.emit('scan_progress', { ...stats, adminId: this.scanAdminId, elapsedMs: now - startedAt });
       } else {
+        console.log('HISTORY SCAN: heartbeat',
+          'scanned=', stats.scanned,
+          'checkpoint=', stats.lastMessageId,
+          'secondsSinceLastMessage=', Math.floor((now - stats.lastMessageAt) / 1000),
+          'elapsedMs=', now - startedAt);
         this.emit('scan_heartbeat', { ...stats, adminId: this.scanAdminId, elapsedMs: now - startedAt });
       }
     };
