@@ -153,31 +153,65 @@ export class HistoryScanner {
   async scan({ chatId, maxMessages = 50000, offsetId = 0, onResource, adminId = null }) {
     if (this.running) throw new Error('历史扫描已经在运行');
     if (!this.client) throw new Error('请先绑定扫描账号');
+    if (typeof onResource !== 'function') throw new Error('历史扫描缺少资源入库处理函数');
+
+    // 先确认仓库可访问，再锁定扫描状态；避免实体解析失败后留下假“扫描中”状态。
     const entity = await this.getRepositoryEntity(chatId);
     this.running = true;
     this.scanAdminId = adminId;
 
+    const startedAt = Date.now();
     const stats = {
       scanned: 0,
       resources: 0,
       skipped: 0,
       errors: 0,
-      startedAt: Date.now(),
+      startedAt,
       lastMessageId: Number(offsetId || 0),
+      lastProgressAt: startedAt,
+      lastMessageAt: startedAt,
+      lastMessageAgeMs: 0,
     };
 
-    this.emit('scan_started', stats);
+    let lastEmittedScanned = 0;
+    let heartbeat = null;
+    const emitProgress = (force = false) => {
+      const now = Date.now();
+      stats.lastProgressAt = now;
+      stats.lastMessageAgeMs = now - stats.lastMessageAt;
+      if (force || stats.scanned !== lastEmittedScanned) {
+        lastEmittedScanned = stats.scanned;
+        this.emit('scan_progress', { ...stats, adminId: this.scanAdminId, elapsedMs: now - startedAt });
+      } else {
+        this.emit('scan_heartbeat', { ...stats, adminId: this.scanAdminId, elapsedMs: now - startedAt });
+      }
+    };
+
+    this.emit('scan_started', { ...stats, adminId: this.scanAdminId });
+    // 即使 Telegram 正在等待下一页，外部也能看到心跳；不会把“网络等待”误判成死锁。
+    heartbeat = setInterval(() => {
+      if (!this.running) return;
+      try { emitProgress(false); } catch (error) {
+        console.warn('HISTORY SCAN heartbeat callback failed:', error?.message || String(error));
+      }
+    }, 15000);
+
     try {
+      const requestedLimit = Number(maxMessages);
       const params = {
-        limit: Number(maxMessages) > 0 ? Number(maxMessages) : undefined,
+        limit: Number.isFinite(requestedLimit) && requestedLimit > 0 ? requestedLimit : undefined,
         offsetId: Number(offsetId || 0),
         waitTime: 1,
       };
 
+      console.log('HISTORY SCAN: iterMessages 开始，chatId=', String(chatId),
+        'offsetId=', params.offsetId, 'limit=', params.limit || 'all');
+
       for await (const message of this.client.iterMessages(entity, params)) {
         if (!this.running) break;
         stats.scanned++;
-        stats.lastMessageId = Number(message.id || stats.lastMessageId);
+        stats.lastMessageId = Number(message?.id || stats.lastMessageId);
+        stats.lastMessageAt = Date.now();
 
         try {
           const item = HistoryScanner.resourceFromMessage(message, chatId);
@@ -189,19 +223,49 @@ export class HistoryScanner {
           }
         } catch (error) {
           stats.errors++;
-          this.emit('scan_item_error', { error: error?.message || String(error), messageId: stats.lastMessageId });
+          this.emit('scan_item_error', {
+            error: error?.message || String(error),
+            messageId: stats.lastMessageId,
+            scanned: stats.scanned,
+            resources: stats.resources,
+            errors: stats.errors,
+          });
         }
 
-        if (stats.scanned % 100 === 0) {
-          this.emit('scan_progress', { ...stats, adminId: this.scanAdminId });
-        }
+        // 更频繁地保存可见进度，避免长扫描期间只显示旧的百条整数进度。
+        if (stats.scanned % 50 === 0) emitProgress(true);
       }
+      stats.completed = this.running;
+      stats.stopReason = this.running ? 'iterator_exhausted' : 'requested_stop';
+    } catch (error) {
+      stats.completed = false;
+      stats.stopReason = 'error';
+      stats.fatalError = error?.message || String(error);
+      this.emit('scan_error', {
+        error: stats.fatalError,
+        ...stats,
+        adminId: this.scanAdminId,
+        elapsedMs: Date.now() - startedAt,
+      });
+      throw error;
     } finally {
+      if (heartbeat) clearInterval(heartbeat);
       stats.finishedAt = Date.now();
+      stats.elapsedMs = stats.finishedAt - startedAt;
       stats.stopped = !this.running;
+      stats.lastMessageAgeMs = stats.finishedAt - stats.lastMessageAt;
       this.running = false;
       this.scanAdminId = null;
-      this.emit('scan_finished', { ...stats });
+      this.emit('scan_finished', { ...stats, adminId });
+      console.log('HISTORY SCAN: finished',
+        'scanned=', stats.scanned,
+        'resources=', stats.resources,
+        'skipped=', stats.skipped,
+        'errors=', stats.errors,
+        'lastMessageId=', stats.lastMessageId,
+        'stopReason=', stats.stopReason || 'unknown',
+        'elapsedMs=', stats.elapsedMs,
+        stats.fatalError ? 'error=' + stats.fatalError : '');
     }
     return stats;
   }
