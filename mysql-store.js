@@ -247,7 +247,7 @@ export async function initializeMySQL(db) {
         ...raw,
         chatId:String(row.chat_id ?? raw.chatId ?? ""),
         messageId:Number(row.message_id ?? raw.messageId ?? 0),
-        directoryId:(row.folder_id!=null && fm.has(String(row.folder_id))) ? String(row.folder_id) : (raw.directoryId!=null && fm.has(String(raw.directoryId)) ? String(raw.directoryId) : null),
+        directoryId:row.folder_id!=null ? (fm.has(String(row.folder_id)) ? String(row.folder_id) : null) : (raw.directoryId!=null && fm.has(String(raw.directoryId)) ? String(raw.directoryId) : null),
         title:row.title ?? raw.title ?? "",
         caption:row.caption ?? raw.caption ?? "",
         fileType:row.file_type ?? raw.fileType ?? "",
