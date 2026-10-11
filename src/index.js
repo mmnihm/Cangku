@@ -2112,6 +2112,8 @@ async function scanHistory(uid, targetRepo=null) {
   if (!r) return send(TOKEN,uid,"❌ <b>没有可扫描的资源仓库</b>\\n\\n请先绑定仓库，或从「🔄 迁移仓库」指定旧仓库。",adminMenu());
 
   const previousCheckpoint=Number(db.settings.historyScan.lastMessageId||0);
+  // 只有历史读取超时中断的任务，才从旧消息断点继续；普通完成后的扫描仍按增量模式处理。
+  const resumeOlderHistory=Boolean(historyState.resumeOlderHistory && previousCheckpoint>0);
   const startedAt=Date.now();
   db.settings.historyScan={status:"running",scanned:0,indexed:0,startedAt,finishedAt:null,error:"",lastMessageId:previousCheckpoint};
   saveDb();
@@ -2176,7 +2178,11 @@ async function scanHistory(uid, targetRepo=null) {
     let scanned = 0, indexed = 0, boundary = previousCheckpoint;
     let lastProgressAt = Date.now();
     console.log("🔎 HISTORY SCAN: iterMessages 开始，checkpoint=", previousCheckpoint);
-    const historyIterator = client.iterMessages(entity,{limit:undefined})[Symbol.asyncIterator]();
+    const iteratorOptions = resumeOlderHistory
+      ? {limit:undefined,offsetId:previousCheckpoint}
+      : {limit:undefined};
+    console.log("🔎 HISTORY SCAN: mode=",resumeOlderHistory?"resume-older":"incremental-or-full","checkpoint=",previousCheckpoint);
+    const historyIterator = client.iterMessages(entity,iteratorOptions)[Symbol.asyncIterator]();
     while (true) {
       // Telegram 历史读取若长时间没有返回下一条消息，不能无限停在“扫描中”。
       // 超时会走统一错误处理并保留最近断点，管理员可再次启动续扫。
@@ -2195,7 +2201,7 @@ async function scanHistory(uid, targetRepo=null) {
       if (next.done) break;
       const message = next.value;
       const messageId=Number(message?.id||0);
-      if (previousCheckpoint > 0 && messageId > 0 && messageId <= previousCheckpoint) break;
+      if (!resumeOlderHistory && previousCheckpoint > 0 && messageId > 0 && messageId <= previousCheckpoint) break;
       scanned++;
       if (indexHistoryMessage(message,r.chatId)) indexed++;
       if (messageId > 0) boundary=messageId;
@@ -2213,7 +2219,7 @@ async function scanHistory(uid, targetRepo=null) {
     if (GOOGLE_SHEETS_CREDENTIAL && GOOGLE_SHEETS_ID) {
       console.log("📊 HISTORY SCAN: 本地索引已完成，备份写入队列继续在后台处理。");
     }
-    db.settings.historyScan={status:"completed",scanned,indexed,startedAt,finishedAt:Date.now(),error:"",lastMessageId:boundary};
+    db.settings.historyScan={status:"completed",scanned,indexed,startedAt,finishedAt:Date.now(),error:"",lastMessageId:boundary,resumeOlderHistory:false};
     saveDb();
 
     const doneText =
@@ -2242,6 +2248,10 @@ async function scanHistory(uid, targetRepo=null) {
   } catch(e) {
     db.settings.historyScan.status="error";
     db.settings.historyScan.error=e.message;
+    if(String(e?.message||"").includes("Telegram 历史消息读取连续 180 秒无响应")) {
+      db.settings.historyScan.resumeOlderHistory=true;
+      db.settings.historyScan.lastMessageId=Number(db.settings.historyScan.lastMessageId||0);
+    }
     db.settings.historyScan.finishedAt=Date.now();
     saveDb();
     console.error("❌ HISTORY SCAN:",e);
