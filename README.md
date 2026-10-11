@@ -48,11 +48,11 @@ npm start
 
 ## 数据主从关系（重要）
 
-- `DATA_FILE` 指向的 JSON 是机器人运行时的主数据源；目录、资源索引、用户状态和设置以 JSON 为准。
-- `database.json.bak` 和按小时生成的 JSON 快照用于本地恢复。建议定期把 JSON 与备份复制到另一台服务器或独立存储。
-- Google Sheets 仅作为外部备份/查看副本：机器人启动时只把 JSON 中的目录和资源写入表格，不会自动从 Google Sheets 导入或覆盖 JSON。表格连接失败不应阻止机器人启动和用户使用。
-- MySQL 仍保留为辅助持久化/兼容层；切换服务器前应先确认 JSON 文件及备份完整，不要只依赖外部表格或 MySQL。
-- 需要从 Google Sheets 手动恢复数据时，应先备份当前 JSON，再执行明确的人工恢复流程；不要把自动同步表格当作主库。
+- 配置 `DB_HOST`/`DB_NAME`（或 `DATABASE_URL`）并成功连接时，MySQL 的 `folders` 与 `resources` 关系表是目录/资源的权威数据源；机器人将其加载到共享运行时索引，目录、搜索、随机获取、最新资源、上传、历史扫描和同步等功能共用这份索引。
+- `resources.folder_id` 是资源所属文件夹的权威关联；启动加载时以 MySQL 结构化列为准，并用 `data` JSON 保留额外业务字段。没有 `folder_id` 的资源不会被擅自分配到未知文件夹。
+- `bot_state` 保存用户、设置和任务等状态快照；本地 `DATA_FILE` JSON 与 `.bak` 作为回退/备份，不应以空的本地文件覆盖已有 MySQL 资源。
+- Google Sheets 仅作为外部备份/查看副本，不作为启动时的数据导入源；表格连接失败不应阻止机器人启动和用户使用。
+- 修改数据主从关系或迁移服务器前，先备份 MySQL 和本地 JSON。不要把 Google Sheets 自动同步当作主库。
 
 ## 重要设置
 
