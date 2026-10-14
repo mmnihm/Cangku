@@ -6278,10 +6278,7 @@ async function backupRecoveryMerge(uid) {
 }
 
 async function mainMessage(msg) {
-  // 上传中的文件只进入当前批次，不要为每个文件触发跨机器人 Google Sheets 刷新。
-  const preUploadState=msg?.chat?.type==="private" ? states.get("m:"+String(msg.from?.id||"")) : null;
-  if(!(preUploadState?.step==="upload_file" || preUploadState?.step==="upload_folder" || preUploadState?.step==="folder_create")) {
-  }
+  // 上传状态由下方统一处理；这里不做空分支判断。
   // Telegram 消息处理不能等待 Google Sheets；共享数据在后台同步。
   if(await binding(msg)) return;
   if(msg.chat?.type!=="private") { indexResource(msg); queueRepositoryAutoSyncMessage(msg); return; }
@@ -6448,9 +6445,10 @@ async function mainMessage(msg) {
   const savedFresh=savedUpload && Date.now()-Number(savedUpload.updatedAt||0) < 5*60*1000;
   if(admin && savedFresh && (!s || !["upload_file","upload_select"].includes(String(s.step)))){
     const saved=savedUpload;
-    if(saved.step==="upload_file" || saved.step==="upload_select" || saved.step==="folder_create"){
+    if(saved.step==="upload_file" || saved.step==="upload_select" || saved.step==="folder_create" || saved.step==="folder_create_description"){
       s={
         step:String(saved.step),
+        folderName:String(saved.folderName||""),
         directoryId:String(saved.directoryId||""),
         directoryName:String(saved.directoryName||""),
         pendingUploads:(Array.isArray(saved.pendingMessageIds)?saved.pendingMessageIds:[]).map(id=>({messageId:Number(id)})).filter(x=>Number.isFinite(x.messageId)),
@@ -6499,51 +6497,16 @@ async function mainMessage(msg) {
     if(!d) return sendHtml(TOKEN,uid,"❌ <b>文件夹创建失败</b>\n\n请重新创建。");
     d.description=description;
     touchSharedData(uid); queueBaserowDirectorySync(d); saveDb();
-    states.set(key,{step:"upload_file",directoryId:d.id,directoryName:d.name,directoryDescription:d.description||"",pendingUploads:[]});
-    if(db.settings?.uploadSessions?.[key]) delete db.settings.uploadSessions[key];
+    const nextUploadState={step:"upload_file",directoryId:String(d.id),directoryName:d.name,directoryDescription:d.description||"",pendingUploads:[],controlMessageId:Number(s.controlMessageId||0)};
+    states.set(key,nextUploadState);
+    if(!db.settings.uploadSessions || typeof db.settings.uploadSessions!=="object") db.settings.uploadSessions={};
+    db.settings.uploadSessions[key]={step:"upload_file",directoryId:String(d.id),directoryName:d.name,pendingMessageIds:[],controlMessageId:Number(s.controlMessageId||0),updatedAt:Date.now()};
+    saveDb();
     logAdmin(uid,"新建文件夹",d.name+(d.description?"："+d.description:""));
     return sendHtml(TOKEN,uid,"✅ <b>文件夹创建成功</b>\n\n📁 "+escapeHtml(d.name)+(d.description?"\n📝 "+escapeHtml(d.description):"")+"\n\n现在可以直接发送文件。",{reply_markup:{inline_keyboard:[[{text:"▶️ 继续上传",callback_data:"upload_continue"},{text:"✅ 结束上传",callback_data:"upload_finish"}],[{text:"❌ 取消上传",callback_data:"upload_cancel"}]]}});
   }
 
-  // 旧的 folder_create 分支已合并到上面的最高优先级状态机。
-  if(false && s?.step==="folder_create"&&admin) {
-    if(t==="/cancel" || t==="❌ 取消") {
-      states.delete(key);
-      if(db.settings?.uploadSessions?.[key]) { delete db.settings.uploadSessions[key]; saveDb(); }
-      return sendHtml(TOKEN,uid,"❌ <b>已取消新建文件夹</b>",{reply_markup:uploadFolderInlineMenu()});
-    }
-    const folderName=String(t||"").trim().replace(/^📁\s*/,"").slice(0,80);
-    if(!folderName) return sendHtml(TOKEN,uid,"⚠️ <b>文件夹名称不能为空</b>\\n\\n请重新发送名称。");
-    const same=db.directories.find(x=>String(x.name||"").trim().toLowerCase()===folderName.toLowerCase());
-    if(same) {
-      states.set(key,{step:"upload_file",directoryId:same.id,directoryName:same.name,directoryDescription:same.description||"",pendingUploads:[]});
-      return sendHtml(TOKEN,uid,"⚠️ <b>这个文件夹已经存在</b>\\n\\n📁 "+escapeHtml(same.name)+(same.description?"\\n📝 "+escapeHtml(same.description):"")+"\\n\\n已切换到这个文件夹，现在可以直接发送文件。",{reply_markup:{inline_keyboard:[[{text:"▶️ 继续上传",callback_data:"upload_continue"},{text:"✅ 结束上传",callback_data:"upload_finish"}],[{text:"❌ 取消上传",callback_data:"upload_cancel"}]]}});
-    }
-    states.set(key,{step:"folder_create_description",folderName});
-    return sendHtml(TOKEN,uid,"📝 <b>设置文件夹说明</b>\\n\\n📁 "+escapeHtml(folderName)+"\\n\\n请输入说明（可选，最多300字）。\\n不需要说明请发送「无」。\\n发送 /cancel 可取消。");
-  }
-  if(s?.step==="folder_create_description"&&admin) {
-    if(t==="/cancel" || t==="❌ 取消") {
-      states.delete(key);
-      return sendHtml(TOKEN,uid,"❌ <b>已取消新建文件夹</b>",{reply_markup:uploadFolderInlineMenu()});
-    }
-    const folderName=String(s.folderName||"").trim().slice(0,80);
-    const description=rawText==="无" ? "" : rawText.slice(0,300);
-    if(!folderName) {
-      states.delete(key);
-      return sendHtml(TOKEN,uid,"⚠️ 文件夹名称丢失，请重新创建。",{reply_markup:uploadFolderInlineMenu()});
-    }
-    const d=ensureDirectory(folderName,description);
-    if(!d) return sendHtml(TOKEN,uid,"❌ <b>文件夹创建失败</b>\\n\\n请重新创建。");
-    touchSharedData(uid);
-    queueBaserowDirectorySync(d);
-    saveDb();
-    states.set(key,{step:"upload_file",directoryId:d.id,directoryName:d.name,directoryDescription:d.description||"",pendingUploads:[]});
-    if(db.settings?.uploadSessions?.[key]) delete db.settings.uploadSessions[key];
-    logAdmin(uid,"新建文件夹",d.name+(d.description?"："+d.description:""));
-    return sendHtml(TOKEN,uid,"✅ <b>文件夹创建成功</b>\\n\\n📁 "+escapeHtml(d.name)+(d.description?"\\n📝 "+escapeHtml(d.description):"")+"\\n\\n现在可以直接发送文件。",{reply_markup:{inline_keyboard:[[{text:"▶️ 继续上传",callback_data:"upload_continue"},{text:"✅ 结束上传",callback_data:"upload_finish"}],[{text:"❌ 取消上传",callback_data:"upload_cancel"}]]}});
-  }
-
+  // 已移除旧的重复文件夹创建分支，统一使用上方的文件夹状态机。
 
   if(admin && s?.step==="backup_token") {
     const value=String(t||"").trim();
@@ -8356,9 +8319,13 @@ async function handleDirectoryCallback(token, q, child=false) {
       if(uploadTimers.has(oldUploadKey)) { clearTimeout(uploadTimers.get(oldUploadKey)); uploadTimers.delete(oldUploadKey); }
       if(uploadAckTimers.has(oldUploadKey)) { clearTimeout(uploadAckTimers.get(oldUploadKey)); uploadAckTimers.delete(oldUploadKey); }
       states.delete(oldUploadKey);
+      if(db.settings?.uploadSessions?.[oldUploadKey]) {
+        delete db.settings.uploadSessions[oldUploadKey];
+        saveDb();
+      }
       if(!repo()){
         void answer("尚未绑定资源仓库",true);
-        return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>📤 上传资源</b>\n━━━━━━━━━━━━━━\n\n⚠️ 还没有绑定资源仓库，文件暂时不能入库。\n可以先选择或新建文件夹。\n\n👇 请选择文件夹",parse_mode:"HTML",reply_markup:uploadFolderInlineMenu()});
+        return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>📤 上传资源</b>\n━━━━━━━━━━━━━━\n\n⚠️ 尚未绑定资源仓库，创建文件夹和接收文件都无法完成入库。\n请先绑定资源仓库，再开始上传。",parse_mode:"HTML",reply_markup:{inline_keyboard:[[{text:"📦 绑定资源仓库",callback_data:"adm:repo"}],[{text:"⬅️ 返回资源管理",callback_data:"admin:resource"}]]}});
       }
       const key=uploadStateKey(uid,child,token);
       if(uploadTimers.has(key)) { clearTimeout(uploadTimers.get(key)); uploadTimers.delete(key); }
@@ -9016,12 +8983,11 @@ async function handleDirectoryCallback(token, q, child=false) {
     const uploadKey=uploadStateKey(uid,child,token);
     if(uploadTimers.has(uploadKey)) { clearTimeout(uploadTimers.get(uploadKey)); uploadTimers.delete(uploadKey); }
     if(uploadAckTimers.has(uploadKey)) { clearTimeout(uploadAckTimers.get(uploadKey)); uploadAckTimers.delete(uploadKey); }
-    states.set(uploadKey,{
-      step:"upload_file",
-      directoryId:d.id,
-      directoryName:d.name,
-      pendingUploads:[]
-    });
+    const selectedUploadState={step:"upload_file",directoryId:String(d.id),directoryName:d.name,pendingUploads:[],controlMessageId:Number(messageId||0)};
+    states.set(uploadKey,selectedUploadState);
+    if(!db.settings.uploadSessions || typeof db.settings.uploadSessions!=="object") db.settings.uploadSessions={};
+    db.settings.uploadSessions[uploadKey]={step:"upload_file",directoryId:String(d.id),directoryName:d.name,pendingMessageIds:[],controlMessageId:Number(messageId||0),updatedAt:Date.now()};
+    saveDb();
     void answer("已进入上传模式");
     return safeEdit(token,{
       chat_id:chatId,
