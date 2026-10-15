@@ -2219,8 +2219,9 @@ async function scanHistory(uid, targetRepo=null) {
         if (iteratorTimeout) clearTimeout(iteratorTimeout);
       }
       if (next?.timeout) {
-        console.warn("⚠️ HISTORY SCAN 45 秒没有新消息，按扫描结束处理 scanned=", scanned);
-        break;
+        console.warn("⚠️ HISTORY SCAN 45 秒无新消息，保存断点并中断本轮扫描 scanned=", scanned, "checkpoint=", boundary);
+        await updateProgress(scanned,indexed,boundary,true);
+        throw new Error("HISTORY_SCAN_TIMEOUT: Telegram 历史消息连续 45 秒没有新消息，已保存断点；请稍后继续扫描。");
       }
       if (next.done) break;
       const message = next.value;
@@ -2244,8 +2245,6 @@ async function scanHistory(uid, targetRepo=null) {
       console.log("📊 HISTORY SCAN: 本地索引已完成，备份写入队列继续在后台处理。");
     }
     db.settings.historyScan={status:"completed",scanned,indexed,startedAt,finishedAt:Date.now(),error:"",lastMessageId:boundary,resumeOlderHistory:false};
-    saveDb();
-    waitBaserowSyncQueue().catch(e=>console.warn("⚠️ 扫描后的表格同步继续后台处理:", String(e?.message||e)));
     saveDb();
     waitBaserowSyncQueue().catch(e=>console.warn("⚠️ 扫描后的表格同步继续后台处理:", String(e?.message||e)));
 
@@ -2275,7 +2274,7 @@ async function scanHistory(uid, targetRepo=null) {
   } catch(e) {
     db.settings.historyScan.status="error";
     db.settings.historyScan.error=e.message;
-    if(String(e?.message||"").includes("Telegram 历史消息读取连续 180 秒无响应")) {
+    if(String(e?.message||"").includes("Telegram 历史消息读取连续 180 秒无响应") || String(e?.message||"").includes("HISTORY_SCAN_TIMEOUT")) {
       db.settings.historyScan.resumeOlderHistory=true;
       db.settings.historyScan.lastMessageId=Number(db.settings.historyScan.lastMessageId||0);
     }
@@ -4934,11 +4933,37 @@ async function finalizeUploadUnlocked(uid, state, token=TOKEN, stateKey=uploadSt
   }
   return sendHtml(token,uid,doneText,menu);
 }
-async function finalizeUpload(uid, state, token=TOKEN, stateKey=uploadStateKey(uid,false,TOKEN), menu=adminMenu()) {
+async function finalizeUpload(uid, state, token=TOKEN, stateKey=uploadStateKey(uid,false,TOKEN), menu=adminMenu(), options={}) {
   const lockKey=tokenFingerprint(token)+":"+String(uid);
-  if(finalizingUploads.has(lockKey)) return send(token,uid,"⏳ 正在整理本批资源，请不要重复点击结束上传。");
+  if(finalizingUploads.has(lockKey)) {
+    if(options.callbackQueryId) {
+      try { await tg(token,"answerCallbackQuery",{callback_query_id:options.callbackQueryId,text:"本批上传正在整理，请勿重复点击"}); } catch {}
+    }
+    return null;
+  }
+  const items=Array.isArray(state?.pendingUploads)?state.pendingUploads:[];
+  if(!items.length) {
+    states.delete(stateKey);
+    if(db.settings?.uploadSessions?.[stateKey]) { delete db.settings.uploadSessions[stateKey]; saveDb(); }
+    return sendHtml(token,uid,"⚠️ <b>当前批次没有收到文件</b>\n\n请先发送文件，再点击「✅ 结束上传」。",menu);
+  }
   finalizingUploads.add(lockKey);
   try {
+    if(uploadTimers.has(stateKey)) { clearTimeout(uploadTimers.get(stateKey)); uploadTimers.delete(stateKey); }
+    if(uploadAckTimers.has(stateKey)) { clearTimeout(uploadAckTimers.get(stateKey)); uploadAckTimers.delete(stateKey); }
+    if(globalThis.uploadStatusTimers?.has(stateKey)) {
+      clearTimeout(globalThis.uploadStatusTimers.get(stateKey));
+      globalThis.uploadStatusTimers.delete(stateKey);
+    }
+    const statusText="⏳ <b>已结束上传</b>\n━━━━━━━━━━━━━━\n\n"+
+      "📁 文件夹：<b>"+escapeHtml(state.directoryName||"未命名")+"</b>\n"+
+      "📥 本批收到：<b>"+items.length+"</b> 个\n\n"+
+      "📥 已收到，正在后台转入仓库群，请稍候……";
+    if(options.callbackMessage?.chat_id && options.callbackMessage?.message_id) {
+      await safeEdit(token,{chat_id:options.callbackMessage.chat_id,message_id:options.callbackMessage.message_id,text:statusText,parse_mode:"HTML",reply_markup:{inline_keyboard:[]}}).catch(()=>{});
+    } else {
+      await sendHtml(token,uid,statusText,{reply_markup:{remove_keyboard:true}}).catch(()=>{});
+    }
     return await finalizeUploadUnlocked(uid,state,token,stateKey,menu);
   } finally {
     finalizingUploads.delete(lockKey);
@@ -5669,6 +5694,8 @@ function removeInvalidResource(item, reason="") {
   }
 
   if(before!==db.resources.length) {
+    if(!Array.isArray(db.settings.mysqlDeletedResources)) db.settings.mysqlDeletedResources=[];
+    db.settings.mysqlDeletedResources=[...new Set([...db.settings.mysqlDeletedResources.map(String),key])].slice(-5000);
     queueBaserowDeleteResource(item);
     console.warn("🧹 已清理无效资源：",key,reason ? "| "+String(reason).slice(0,200) : "");
     saveDb();
@@ -7485,15 +7512,7 @@ async function mainMessage(msg) {
       const finishState=states.get(key)||s;
       const count=Array.isArray(finishState?.pendingUploads)?finishState.pendingUploads.length:0;
       if(!count) return sendHtml(TOKEN,uid,"⚠️ <b>当前批次没有收到文件</b>\n\n请先发送文件，再点击「✅ 结束上传」。",adminMenu());
-      states.delete(key);
-      if(db.settings?.uploadSessions?.[key]) { delete db.settings.uploadSessions[key]; saveDb(); }
-      await sendHtml(TOKEN,uid,
-        "⏳ <b>已结束上传</b>\n━━━━━━━━━━━━━━\n\n"+
-        "📁 文件夹：<b>"+escapeHtml(finishState.directoryName||"未命名")+"</b>\n"+
-        "📥 本批收到：<b>"+count+"</b> 个\n\n"+
-        "📥 已收到，正在后台转入仓库群，你可以继续操作。",
-        {reply_markup:{remove_keyboard:true}}
-      ).catch(()=>{});
+      // 状态与上传会话由统一终结器清理，避免主流程和回调流程重复执行。
       void finalizeUpload(uid,finishState,TOKEN,key,adminMenu()).catch(e=>{
         console.error("❌ UPLOAD FINALIZE TEXT:",String(e?.message||e));
         sendHtml(TOKEN,uid,"❌ <b>上传整理失败</b>\n\n<code>"+escapeHtml(String(e?.message||e))+"</code>",adminMenu()).catch(()=>{});
@@ -7690,9 +7709,10 @@ async function childMessage(child,msg,token) {
     if(t==="✅ 结束上传") {
       if(uploadTimers.has(key)) { clearTimeout(uploadTimers.get(key)); uploadTimers.delete(key); }
       if(uploadAckTimers.has(key)) { clearTimeout(uploadAckTimers.get(key)); uploadAckTimers.delete(key); }
-      void sendHtml(token,uid,"🔄 <b>正在结束上传</b>\n\n正在统一转存本批资源，请稍候……",{reply_markup:{remove_keyboard:true}}).catch(()=>{});
-      void finalizeUpload(uid,s,token,key,childAdminMenu()).catch(e=>console.error("❌ CHILD UPLOAD FINALIZE:",String(e?.message||e)));
-      states.delete(key);
+      void finalizeUpload(uid,s,token,key,childAdminMenu()).catch(e=>{
+        console.error("❌ CHILD UPLOAD FINALIZE:",String(e?.message||e));
+        sendHtml(token,uid,"❌ <b>上传整理失败</b>\n\n<code>"+escapeHtml(String(e?.message||e))+"</code>",childAdminMenu()).catch(()=>{});
+      });
       return;
     }
     const handled=await withUploadLock(key,()=>receiveUploadMedia(token,uid,key,states.get(key)||s,msg,true));
@@ -7967,15 +7987,7 @@ async function handleDirectoryCallback(token, q, child=false) {
     if(uploadAckTimers.has(finishKey)){clearTimeout(uploadAckTimers.get(finishKey));uploadAckTimers.delete(finishKey);}
     const count=Array.isArray(finishState.pendingUploads)?finishState.pendingUploads.length:0;
     await answer(count?"已结束，正在整理资源":"当前批次没有文件",false);
-    // 先编辑当前按钮消息，确保用户立即看到响应。
-    await safeEdit(token,{chat_id:chatId,message_id:messageId,
-      text:"⏳ <b>已结束上传</b>\n━━━━━━━━━━━━━━\n\n📁 文件夹：<b>"+escapeHtml(finishState.directoryName||"未命名")+"</b>\n📥 本批收到：<b>"+count+"</b> 个\n\n📥 已收到，正在后台转入仓库群，你可以继续操作。",
-      parse_mode:"HTML",reply_markup:{inline_keyboard:[]}});
-    if(!count){
-      states.delete(finishKey);
-      return;
-    }
-    void finalizeUpload(uid,finishState,token,finishKey,child?childAdminMenu():adminMenu()).catch(e=>{
+    void finalizeUpload(uid,finishState,token,finishKey,child?childAdminMenu():adminMenu(),{callbackMessage:{chat_id:chatId,message_id:messageId},callbackQueryId:q?.id}).catch(e=>{
       console.error("❌ UPLOAD FINALIZE BACKGROUND:",String(e?.message||e));
       sendHtml(token,uid,"❌ <b>上传整理失败</b>\n\n<code>"+escapeHtml(String(e?.message||e))+"</code>",child?childAdminMenu():adminMenu()).catch(()=>{});
     });
@@ -9450,4 +9462,3 @@ async function boot(){
   }
 }
 boot().catch(e=>console.error("❌ FATAL BOOT:",e));
-process.on("SIGTERM",()=>{console.log("SIGTERM received");server.close(()=>process.exit(0));});

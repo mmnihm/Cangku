@@ -6,6 +6,7 @@ let ready = false;
 let writeQueue = Promise.resolve();
 let pendingSnapshot = null;
 let writeRunning = false;
+const processedDeletionKeys = new Set();
 
 function envBool(v, fallback=false) {
   const s=String(v ?? "").trim().toLowerCase();
@@ -161,12 +162,21 @@ async function persistNormalized(db) {
       if(!r?.chatId) continue;
       await conn.execute("INSERT INTO repositories (chat_id,title,username,repo_type,status,data,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE title=VALUES(title),username=VALUES(username),repo_type=VALUES(repo_type),status=VALUES(status),data=VALUES(data),updated_at=VALUES(updated_at)",[String(r.chatId),String(r.title||"").slice(0,1000),String(r.username||""),String(r.type||r.repoType||""),r.status||"active",JSON.stringify(r),Number(r.createdAt||Date.now()),Date.now()]);
     }
+    const currentResourceKeys=new Set((Array.isArray(db.resources)?db.resources:[]).map(resourceKey));
+    const pendingDeletedKeys=[];
+    for(const rawKey of Array.isArray(db.settings?.mysqlDeletedResources)?db.settings.mysqlDeletedResources:[]) {
+      const key=String(rawKey||"");
+      if(!key || currentResourceKeys.has(key) || processedDeletionKeys.has(key)) continue;
+      await conn.execute("UPDATE resources SET status='deleted',updated_at=? WHERE resource_key=?",[Date.now(),key]);
+      pendingDeletedKeys.push(key);
+    }
     const task=db.settings?.repositoryAutoSync;
     if(task?.sourceId || task?.targetId) {
       const taskKey=String(task.sourceId||"")+":"+String(task.targetId||"");
       await conn.execute("INSERT INTO sync_tasks (task_key,source_chat_id,target_chat_id,status,last_message_id,queued,copied,skipped,failed,last_error,data,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?, ?,?) ON DUPLICATE KEY UPDATE source_chat_id=VALUES(source_chat_id),target_chat_id=VALUES(target_chat_id),status=VALUES(status),last_message_id=VALUES(last_message_id),queued=VALUES(queued),copied=VALUES(copied),skipped=VALUES(skipped),failed=VALUES(failed),last_error=VALUES(last_error),data=VALUES(data),updated_at=VALUES(updated_at)",[taskKey,String(task.sourceId||""),String(task.targetId||""),String(task.status||"idle"),Number(task.lastMessageId||0),Number(task.queue?.length||0),Number(task.copied||0),Number(task.skipped||0),Number(task.failed||0),String(task.lastError||""),JSON.stringify(task),Date.now(),Date.now()]);
     }
     await conn.commit();
+    for(const key of pendingDeletedKeys) processedDeletionKeys.add(key);
   } catch(e) { try { await conn.rollback(); } catch {} throw e; } finally { conn.release(); }
 }
 
@@ -220,8 +230,16 @@ export async function initializeMySQL(db) {
       Object.assign(db,merged);
     }
 
-    // MySQL 关系表优先：JSON data 用于补充扩展字段，结构化列负责权威 ID/名称/文件夹关联。
-    // 即使旧快照中的 directoryId 过期，也以 resources.folder_id 为准，避免目录内容显示不全。
+    // 合并删除标记保护与 MySQL 结构化字段权威读取。
+    const tombstoneKeys=new Set([
+      ...(Array.isArray(remoteState?.settings?.mysqlDeletedResources)?remoteState.settings.mysqlDeletedResources:[]),
+      ...(Array.isArray(db.settings?.mysqlDeletedResources)?db.settings.mysqlDeletedResources:[])
+    ].map(String));
+    if(tombstoneKeys.size) {
+      if(!db.settings || typeof db.settings!=="object") db.settings={};
+      db.settings.mysqlDeletedResources=[...tombstoneKeys].slice(-5000);
+      if(Array.isArray(db.resources)) db.resources=db.resources.filter(x=>!tombstoneKeys.has(resourceKey(x)));
+    }
     const [fr]=await pool.query("SELECT id,name,parent_id,sort_order,status,data,created_at,updated_at FROM folders WHERE status <> 'deleted'");
     const [rr]=await pool.query("SELECT id,resource_key,folder_id,chat_id,message_id,title,caption,file_type,file_id,telegram_url,downloads,status,data,created_at,updated_at FROM resources WHERE status <> 'deleted'");
     const fm=new Map((Array.isArray(db.directories)?db.directories:[]).map(x=>[String(x?.id||""),x]).filter(([id])=>id));
