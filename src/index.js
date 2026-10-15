@@ -5607,7 +5607,10 @@ function withoutVideosForGuest(items, member, uid, expandAlbums=true) {
   return {items:kept,blocked:Math.max(0,expanded.length-kept.length),allowed:kept.length};
 }
 async function guestVideoNotice(token, chatId) {
-  return sendHtml(token, chatId, "<b>🎁 今日免费资源额度已用完</b>\n\n非会员每天最多成功获取 <b>"+nonMemberDailyLimit()+"</b> 个资源，照片、视频和其他文件都计入额度。\n明天自动恢复；加入指定会员群后可不限量获取。", userMenu());
+  // 管理员编辑的“非会员提示”必须用于实际发送；同时保留额度用尽说明和用户菜单按钮。
+  const configured = nonMemberMessage(userMenu());
+  const quotaText = "<b>🎁 今日免费资源额度已用完</b>\n\n非会员每天最多成功获取 <b>"+nonMemberDailyLimit()+"</b> 个资源，照片、视频和其他文件都计入额度。\n明天自动恢复；加入指定会员群后可不限量获取。";
+  return sendHtml(token, chatId, configured.text + "\n\n" + quotaText, configured.extra);
 }
 function consumeVideoQuota(uid,items){
   const list=Array.isArray(items)?items:[];
