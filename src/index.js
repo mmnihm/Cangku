@@ -3945,7 +3945,7 @@ function nonMemberDailyRemaining(uid) {
 }
 function consumeNonMemberQuota(uid,count,reservationAlreadyReleased=false) {
   if(!reservationAlreadyReleased) releaseNonMemberQuotaReservation(uid,count);
-  if(isAdmin(uid) || hasActivePremiumMembership(uid) || cachedRequiredGroupMembership(uid)===true || !(Number(count)>0)) return;
+  if(hasUnlimitedResourceAccess(uid) || !(Number(count)>0)) return;
   if(!db.settings.nonMemberDailyUsage || typeof db.settings.nonMemberDailyUsage!=="object") db.settings.nonMemberDailyUsage={};
   const id=String(uid), today=quotaDateKey(), row=db.settings.nonMemberDailyUsage[id];
   if(!row || row.date!==today) db.settings.nonMemberDailyUsage[id]={date:today,used:Number(count)||0};
@@ -5576,11 +5576,16 @@ function search(q) {
   return db.resources.filter(x=>(String(x.title||"")+" "+String(x.caption||"")+" "+String(x.directoryId||"")).toLowerCase().includes(q));
 }
 
+function hasUnlimitedResourceAccess(uid) {
+  // 额度豁免必须基于主机器人确认的指定群成员身份，不能只信任某个回调传入的 member 标记。
+  return isAdmin(uid) || hasActivePremiumMembership(uid) || cachedRequiredGroupMembership(uid)===true;
+}
 function withoutVideosForGuest(items, member, uid, expandAlbums=true) {
   const raw=Array.isArray(items)?items:[];
   // random 模式明确允许单条发送；其他模式继续保留原有相册成组逻辑。
   const expanded=expandAlbums?expandOriginalAlbumItems(raw):raw;
-  if(member || isAdmin(uid) || hasActivePremiumMembership(uid)) return {items:expanded,blocked:0,allowed:expanded.length};
+  // 所有发送入口统一使用已核实的权限，防止某些按钮路径把非群成员误判为免额度。
+  if(hasUnlimitedResourceAccess(uid)) return {items:expanded,blocked:0,allowed:expanded.length};
   // 每日 3 个是全部资源的硬上限；视频额外额度不能绕过该上限。
   const remaining=nonMemberDailyRemaining(uid);
   const limit=remaining===Infinity?expanded.length:Math.max(0,Math.floor(remaining));
@@ -5612,7 +5617,7 @@ function consumeVideoQuota(uid,items){
   if(!list.length) return;
   // 发送成功后先释放本批预留，再按原有规则记账；不改变每日额度数值或会员规则。
   releaseNonMemberQuotaReservation(uid,list.length);
-  if(isAdmin(uid) || hasActivePremiumMembership(uid) || cachedRequiredGroupMembership(uid)===true) return;
+  if(hasUnlimitedResourceAccess(uid)) return;
   const bonusVideos=list.filter(item=>item?.__bonusVideoQuota===true).length;
   const baseCount=Math.max(0,list.length-bonusVideos);
   if(baseCount>0) consumeNonMemberQuota(uid,baseCount,true);
@@ -5831,7 +5836,7 @@ async function deliverFromHistory(token,chatId,userId,items,options={}) {
     if(ok>0) {
       recordStat(userId,"download",ok);
       for(const item of (Array.isArray(album?.sentItems)?album.sentItems:items.slice(0,ok))){recordResourceDownload(item);recordRecent(userId,item);}
-      if(!member&&!isAdmin(userId)) consumeVideoQuota(userId,Array.isArray(album?.sentItems)?album.sentItems:items.slice(0,ok));
+      if(!hasUnlimitedResourceAccess(userId)) consumeVideoQuota(userId,Array.isArray(album?.sentItems)?album.sentItems:items.slice(0,ok));
       else saveDb();
     } else saveDb();
     if(!member&&!isAdmin(userId)&&items.length>ok) releaseNonMemberQuotaReservation(userId,items.length-ok);
@@ -5932,7 +5937,7 @@ async function deliver(token,chatId,userId,items,sourceToken=TOKEN,options={}) {
   try {
     album=await sendResourceAlbum(sourceToken,chatId,valid,{singleEach:false});
   } catch(e) {
-    if(!member&&!isAdmin(userId)) releaseNonMemberQuotaReservation(userId,valid.length);
+    if(!hasUnlimitedResourceAccess(userId)) releaseNonMemberQuotaReservation(userId,valid.length);
     throw e;
   }
   ok=Number(album?.sent||0);
@@ -5947,7 +5952,7 @@ async function deliver(token,chatId,userId,items,sourceToken=TOKEN,options={}) {
 
   if(ok>0) {
     recordStat(userId,"download",ok);
-    if(!member && !isAdmin(userId)) consumeVideoQuota(userId,Array.isArray(album?.sentItems)?album.sentItems:valid.slice(0,ok));
+    if(!hasUnlimitedResourceAccess(userId)) consumeVideoQuota(userId,Array.isArray(album?.sentItems)?album.sentItems:valid.slice(0,ok));
     else saveDb();
   } else {
     saveDb();
@@ -6844,7 +6849,7 @@ async function mainMessage(msg) {
       recordStat(uid,"download",1);
       recordResourceDownload(item);
       recordRecent(uid,item);
-      if(!member&&!isAdmin(uid)) consumeVideoQuota(uid,[item]); else saveDb();
+      if(!hasUnlimitedResourceAccess(uid)) consumeVideoQuota(uid,[item]); else saveDb();
       return sendHtml(TOKEN,uid,
         "<b>🔗 分享资源</b>\n"+
         "━━━━━━━━━━━━━━\n\n"+
@@ -7720,7 +7725,7 @@ async function childMessage(child,msg,token) {
       recordStat(uid,"download",1);
       recordResourceDownload(item);
       recordRecent(uid,item);
-      if(!member&&!isAdmin(uid)) consumeVideoQuota(uid,[item]); else saveDb();
+      if(!hasUnlimitedResourceAccess(uid)) consumeVideoQuota(uid,[item]); else saveDb();
       return sendHtml(token,uid,"<b>🔗 分享资源</b>\n━━━━━━━━━━━━━━\n\n📦 <b>"+escapeHtml(item.title||"未命名资源")+"</b>\n📁 文件夹：<b>"+escapeHtml(db.directories.find(d=>String(d.id)===String(item.directoryId))?.name||"未分类")+"</b>\n\n✅ 资源已发送。",childMenu());
     } catch {
       return sendHtml(token,uid,"<b>❌ 资源获取失败</b>\n\n请稍后重试。",childMenu());
@@ -8194,9 +8199,9 @@ async function handleDirectoryCallback(token, q, child=false) {
       if(sent>0){
         recordStat(uid,"download",sent);
         for(const item of sentItems){recordResourceDownload(item);recordRecent(uid,item);}
-        if(!member&&!isAdmin(uid)){consumeVideoQuota(uid,sentItems);if(guest.items.length>sent)releaseNonMemberQuotaReservation(uid,guest.items.length-sent);}else saveDb();
+        if(!hasUnlimitedResourceAccess(uid)){consumeVideoQuota(uid,sentItems);if(guest.items.length>sent)releaseNonMemberQuotaReservation(uid,guest.items.length-sent);}else saveDb();
       }else{
-        if(!member&&!isAdmin(uid))releaseNonMemberQuotaReservation(uid,guest.items.length);
+        if(!hasUnlimitedResourceAccess(uid))releaseNonMemberQuotaReservation(uid,guest.items.length);
         saveDb();
       }
       settled=true;
@@ -8224,7 +8229,7 @@ async function handleDirectoryCallback(token, q, child=false) {
         return;
       }
       recordStat(uid,"download",1);recordResourceDownload(item);recordRecent(uid,item);
-      if(!member&&!isAdmin(uid))consumeVideoQuota(uid,[item]);else saveDb();
+      if(!hasUnlimitedResourceAccess(uid))consumeVideoQuota(uid,[item]);else saveDb();
       return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>✅ 已发送资源</b>\\n\\n📦 "+escapeHtml(item.title||"未命名资源")+"\\n\\n👇 可以继续浏览",parse_mode:"HTML",reply_markup:{inline_keyboard:[
         [{text:isFavorite(uid,item)?"⭐ 已收藏":"☆ 收藏",callback_data:"favtoggle:"+resourceKey(item)}],
         [{text:"⬅️ 返回我的资源",callback_data:"hub"}]
@@ -8888,7 +8893,7 @@ async function handleDirectoryCallback(token, q, child=false) {
       if(sent>0) {
         recordStat(uid,"download",sent);
         for(const sentItem of sentItems){recordResourceDownload(sentItem);recordRecent(uid,sentItem);}
-        if(!member&&!isAdmin(uid)) consumeVideoQuota(uid,sentItems); else saveDb();
+        if(!hasUnlimitedResourceAccess(uid)) consumeVideoQuota(uid,sentItems); else saveDb();
       } else {
         saveDb();
       }
@@ -9238,7 +9243,7 @@ async function handleDirectoryCallback(token, q, child=false) {
   if(sent) {
     const sentItems=Array.isArray(album?.sentItems)?album.sentItems:batch.slice(0,sent);
     for(const item of sentItems) { recordResourceDownload(item); recordRecent(uid,item); }
-    if(!member && !isAdmin(uid)) consumeVideoQuota(uid,sentItems);
+    if(!hasUnlimitedResourceAccess(uid)) consumeVideoQuota(uid,sentItems);
     else saveDb();
   }
   quotaSettled=true;
