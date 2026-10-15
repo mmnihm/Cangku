@@ -4834,7 +4834,8 @@ async function finalizeUploadUnlocked(uid, state, token=TOKEN, stateKey=uploadSt
         message_ids:ids,
         protect_content:false
       });
-      if(!Array.isArray(copiedIds)||copiedIds.length!==batch.length) throw new Error("批量转存结果数量不一致");
+      if(!Array.isArray(copiedIds)){ console.warn("⚠️ UPLOAD BATCH COPY RETURN INVALID; skip retry to prevent duplicates, count=",batch.length); failed+=batch.length; continue; }
+      if(copiedIds.length!==batch.length){ console.warn("⚠️ UPLOAD BATCH COPY COUNT MISMATCH; skip individual retry, expected=",batch.length,"actual=",copiedIds.length); failed+=Math.max(0,batch.length-copiedIds.length); }
     }catch(e){
       console.warn("⚠️ UPLOAD BATCH COPY FAILED:",e?.message||e,"count=",batch.length);
       for(const entry of batch){
@@ -4865,7 +4866,7 @@ async function finalizeUploadUnlocked(uid, state, token=TOKEN, stateKey=uploadSt
       continue;
     }
 
-    for(let n=0;n<batch.length;n++){
+    for(let n=0;n<Math.min(batch.length,copiedIds.length);n++){
       try{
         const copiedId=Number(copiedIds[n]?.message_id??copiedIds[n]);
         if(!Number.isFinite(copiedId)) throw new Error("批量转存消息ID无效");
@@ -8022,7 +8023,7 @@ async function handleDirectoryCallback(token, q, child=false) {
           [{text:"⬅️ 返回资源管理",callback_data:"admin:resource"}]
         ]}});
     }
-    a.enabled=true;a.status="running";a.updatedAt=Date.now();saveDb();
+    a.enabled=true;a.manualPaused=false;a.status="running";a.lastError="";a.updatedAt=Date.now();saveDb();
     processRepositoryAutoSyncQueue().catch(e=>console.error("❌ 自动同步恢复失败:",String(e?.message||e)));
     return showRepositoryAutoSyncStatus(uid);
   }
