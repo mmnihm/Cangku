@@ -5839,7 +5839,7 @@ async function deliverFromHistory(token,chatId,userId,items,options={}) {
       if(!hasUnlimitedResourceAccess(userId)) consumeVideoQuota(userId,Array.isArray(album?.sentItems)?album.sentItems:items.slice(0,ok));
       else saveDb();
     } else saveDb();
-    if(!member&&!isAdmin(userId)&&items.length>ok) releaseNonMemberQuotaReservation(userId,items.length-ok);
+    if(!hasUnlimitedResourceAccess(userId)&&items.length>ok) releaseNonMemberQuotaReservation(userId,items.length-ok);
     quotaSettled=true;
     const mode=options.mode==="random"?"random":"latest";
     const offset=Math.max(0,Number(options.offset)||0);
@@ -5942,7 +5942,7 @@ async function deliver(token,chatId,userId,items,sourceToken=TOKEN,options={}) {
   }
   ok=Number(album?.sent||0);
   if(options.mode==="random") recordRandomHistory(userId,Array.isArray(album?.sentItems)?album.sentItems:[]);
-  if(!member&&!isAdmin(userId)&&valid.length>ok) releaseNonMemberQuotaReservation(userId,valid.length-ok);
+  if(!hasUnlimitedResourceAccess(userId)&&valid.length>ok) releaseNonMemberQuotaReservation(userId,valid.length-ok);
   albumReplyId=Number(album?.lastMessageId||0);
   fail=Math.max(Number(album?.failed||0),valid.length-ok);
   for(const item of (Array.isArray(album?.sentItems)?album.sentItems:valid.slice(0,ok))) {
@@ -9235,7 +9235,7 @@ async function handleDirectoryCallback(token, q, child=false) {
     return sendHtml(token,chatId,errText,{reply_markup:folderProgressKeyboard(d.id,all.length,offset)});
   }
   const sent=Number(album?.sent||0);
-  if(!member&&!isAdmin(uid)&&batch.length>sent) releaseNonMemberQuotaReservation(uid,batch.length-sent);
+  if(!hasUnlimitedResourceAccess(uid)&&batch.length>sent) releaseNonMemberQuotaReservation(uid,batch.length-sent);
   if(sent) recordStat(uid,"download",sent);
 
   // 只有至少发送成功一条，才推进到下一批；0 条成功时保留当前 offset 供重试。
