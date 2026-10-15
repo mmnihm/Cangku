@@ -4147,28 +4147,25 @@ function adminStatusText(){
     "🛟 备份机器人："+(backupBotConfig().token?"✅ 已配置":"❌ 未配置"),
     "💬 客服待处理："+supportCount+" 个",
     "",
-    "👇 常用功能在下面"
+    "👇 请选择管理模块"
   ].join("\n");
 }
 function adminRootInline(){return{inline_keyboard:[
- [{text:"📤 上传资源",callback_data:"admin:upload"},{text:"🔐 扫描账号",callback_data:"adm:scan_auth"}],
- [{text:"⚡ 自动同步",callback_data:"adm:auto"},{text:"☁️ 123云盘",callback_data:"adm:cloud123"}],
- [{text:"📦 资源目录",callback_data:"admin:resource"},{text:"💬 客服",callback_data:"support:admin"}],
- [{text:"🛟 备份机器人",callback_data:"admin:backupbot"},{text:"✅ 平台状态",callback_data:"admin:root"}],
- [{text:"更多",callback_data:"admin:more"}],
+ [{text:"📤 上传资源",callback_data:"admin:upload"},{text:"📦 资源管理",callback_data:"admin:resource"}],
+ [{text:"📊 数据与运营",callback_data:"admin:ops"},{text:"⚙️ 系统设置",callback_data:"admin:settings"}],
+ [{text:"🤖 机器人管理",callback_data:"admin:bot"},{text:"✅ 平台状态",callback_data:"admin:root"}],
+ [{text:"🧰 更多工具",callback_data:"admin:more"}],
  [{text:"🏠 返回首页",callback_data:"admin:home"}]
 ]};}
 function adminMoreInline(){return{inline_keyboard:[
- [{text:"📊 数据与运营",callback_data:"admin:ops"},{text:"⚙️ 系统设置",callback_data:"admin:settings"}],
- [{text:"🤖 机器人管理",callback_data:"admin:bot"},{text:"💬 在线客服",callback_data:"support:admin"}],
- [{text:"⬅️ 返回管理",callback_data:"admin:root"}]
+ [{text:"🔐 扫描账号",callback_data:"adm:scan_auth"},{text:"⚡ 自动同步",callback_data:"adm:auto"}],
+ [{text:"☁️ 123云盘",callback_data:"adm:cloud123"},{text:"🛟 备份机器人",callback_data:"admin:backupbot"}],
+ [{text:"💬 在线客服",callback_data:"support:admin"},{text:"⬅️ 返回管理",callback_data:"admin:root"}]
 ]};}
 function adminResourceInline(){return{inline_keyboard:[
  [{text:"✏️ 修改文件夹",callback_data:"adm:rename"},{text:"🗑️ 删除资源",callback_data:"adm:delete"}],
  [{text:"🔄 移动资源",callback_data:"adm:move"},{text:"📦 批量管理",callback_data:"adm:bulk"}],
  [{text:"📦 资源仓库",callback_data:"adm:repo"},{text:"🔍 仓库扫描",callback_data:"adm:scan"}],
- [{text:"🔐 扫描账号",callback_data:"adm:scan_auth"},{text:"☁️ 123云盘",callback_data:"adm:cloud123"}],
- [{text:"⚡ 自动同步任务",callback_data:"adm:auto"}],
  [{text:"🏷️ 标签生成文件夹",callback_data:"adm:tagfolders"}],
  [{text:"⬅️ 返回管理",callback_data:"admin:root"}]
 ]};}
