@@ -4305,6 +4305,11 @@ async function receiveUploadMedia(token, uid, key, state, msg, child=false) {
   if(!directoryId || !directoryName) return false;
 
   const pending=Array.isArray(state.pendingUploads)?state.pendingUploads:[];
+  // Telegram updates can be retried; the same source message must only enter a batch once.
+  if(pending.some(x=>Number(x?.messageId||0)===Number(msg.message_id))) {
+    console.warn("⚠️ UPLOAD DUPLICATE UPDATE SKIPPED:",{uid:String(uid),messageId:Number(msg.message_id),folder:directoryName});
+    return true;
+  }
   pending.push({messageId:Number(msg.message_id),msg});
   // 上传过程中不再使用“5分钟自动入库/已收到”第二条提醒。
   // 本批只由下面唯一的动态状态消息显示“已接收 N 个”，用户点击「结束上传」后才入库。
@@ -4836,7 +4841,20 @@ async function finalizeUploadUnlocked(uid, state, token=TOKEN, stateKey=uploadSt
   }
 
   let stored=0,failed=0;
-  const sortedItems=[...items].sort((a,b)=>Number(a.messageId)-Number(b.messageId));
+  // Deduplicate defensively before any Telegram copy request. If an update was retried,
+  // never copy the same source message twice into the repository.
+  const seenSourceIds=new Set();
+  const sortedItems=items
+    .filter(x=>{
+      const id=Number(x?.messageId||0);
+      if(!Number.isFinite(id)||id<=0||seenSourceIds.has(id)) return false;
+      seenSourceIds.add(id);
+      return true;
+    })
+    .sort((a,b)=>Number(a.messageId)-Number(b.messageId));
+  if(sortedItems.length!==items.length) {
+    console.warn("⚠️ UPLOAD DUPLICATE SOURCE IDS REMOVED:",{uid:String(uid),received:items.length,unique:sortedItems.length});
+  }
 
   // 批量转存：每批最多100条；批量失败时只对失败批次逐条兜底。
   const TELEGRAM_COPY_BATCH_SIZE=100;
@@ -4856,7 +4874,17 @@ async function finalizeUploadUnlocked(uid, state, token=TOKEN, stateKey=uploadSt
       if(!Array.isArray(copiedIds)){ console.warn("⚠️ UPLOAD BATCH COPY RETURN INVALID; skip retry to prevent duplicates, count=",batch.length); failed+=batch.length; continue; }
       if(copiedIds.length!==batch.length){ console.warn("⚠️ UPLOAD BATCH COPY COUNT MISMATCH; skip individual retry, expected=",batch.length,"actual=",copiedIds.length); failed+=Math.max(0,batch.length-copiedIds.length); }
     }catch(e){
-      console.warn("⚠️ UPLOAD BATCH COPY FAILED:",e?.message||e,"count=",batch.length);
+      const copyErrorText=String(e?.telegramDescription||e?.message||e||"");
+      console.warn("⚠️ UPLOAD BATCH COPY FAILED:",copyErrorText,"count=",batch.length);
+      // A timeout/reset can happen after Telegram has already copied the whole batch.
+      // Retrying each item in that case creates a second copy of every file.
+      // Only use per-message fallback for definitive Telegram/API rejection errors.
+      const ambiguousCopyFailure=/(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|UND_ERR|socket hang up|fetch failed|network|timed? ?out|aborted|connection reset|connection closed)/i.test(copyErrorText);
+      if(ambiguousCopyFailure) {
+        failed+=batch.length;
+        console.error("⛔ UPLOAD COPY RESULT UNCERTAIN; individual fallback skipped to prevent duplicate copies. Batch requires review.",{count:batch.length,sourceMessageIds:ids,error:copyErrorText});
+        continue;
+      }
       for(const entry of batch){
         try{
           const copied=await tg(token,"copyMessage",{
