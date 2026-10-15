@@ -598,11 +598,6 @@ async function checkGoogleSheetsConnection(){
   }
 }
 
-// 兼容现有业务函数名；实际数据已经完全改由 Google Sheets 提供。
-const BASEROW_TOKEN = GOOGLE_SHEETS_CREDENTIAL;
-const BASEROW_TABLE_ID = GOOGLE_SHEETS_ID;
-async function checkBaserowConnection(){ return checkGoogleSheetsConnection(); }
-
 async function baserowRequest(method,pathName,body){
   if(!GOOGLE_SHEETS_ID) throw new Error("Google Sheets 未配置 GOOGLE_SHEETS_ID");
   if(!GOOGLE_SHEETS_CREDENTIAL) throw new Error("Google Sheets 未配置共享接口");
@@ -941,9 +936,6 @@ async function waitBaserowSyncQueue() {
 
 /* ===== 共享资源中心：Google Sheets 作为唯一共享数据源 ===== */
 let baserowRowsCache = new Map();
-let sharedRefreshAt = 0;
-let sharedRefreshPromise = null;
-let sharedSyncLock = false;
 
 function sharedDirectoryId(name) {
   const clean=String(name||"").trim().replace(/\s+/g," ").toLowerCase();
@@ -1185,50 +1177,6 @@ async function repairLostFolderAssignments(uid) {
   }
 }
 
-async function backfillBaserowFolderAssignments(rows, fields, folderField, titleField) {
-  if(!folderField || !titleField || !Array.isArray(rows)) return 0;
-  const localByTitle=new Map();
-  for(const item of (db.resources||[])) {
-    const title=String(item?.title||"").trim().toLowerCase();
-    if(title && item?.directoryId && !localByTitle.has(title)) localByTitle.set(title,item);
-  }
-  const updates=[];
-  for(const row of rows) {
-    if(!row?.id) continue;
-    const title=String(row?.[titleField.name]??"").trim();
-    if(!title || title.startsWith("__FOLDER__:")) continue;
-    const item=localByTitle.get(title.toLowerCase());
-    if(!item?.directoryId) continue;
-    const d=(db.directories||[]).find(x=>String(x.id)===String(item.directoryId));
-    if(!d?.name) continue;
-    const current=sharedFolderName(row?.[folderField.name]);
-    if(current===d.name) continue;
-    const value=baserowValueForField(folderField,d.name);
-    if(value===undefined) continue;
-    updates.push({id:row.id,payload:{[folderField.name]:value}});
-  }
-  let done=0;
-  for(let i=0;i<updates.length;i+=20) {
-    const batch=updates.slice(i,i+20);
-    await Promise.all(batch.map(async u=>{
-      try {
-        await baserowRequest("PATCH","/api/database/rows/table/"+encodeURIComponent(GOOGLE_SHEETS_ID)+"/"+encodeURIComponent(u.id)+"/?user_field_names=true",u.payload);
-        done++;
-      } catch(e) {
-        console.warn("⚠️ Google Sheets 文件夹回填失败 row="+u.id+":",String(e?.message||e));
-      }
-    }));
-  }
-  if(done) console.log("📁 Google Sheets 文件夹关联回填完成："+done+" 条");
-  return done;
-}
-
-async function pullBaserowSharedData() {
-  // Google Sheets is a one-way backup only. Never import rows into the live JSON database.
-  console.log("ℹ️ Google Sheets 仅作为备份，本次跳过远端读取；运行数据以 JSON 为准。");
-  return false;
-}
-
 async function initializeSharedBaserow() {
   if(!GOOGLE_SHEETS_CREDENTIAL || !GOOGLE_SHEETS_ID) {
     console.log("ℹ️ Google Sheets 备份未配置；继续以 JSON 为主数据库运行。");
@@ -1326,18 +1274,6 @@ async function ensureStartCommand(token) {
   }
 }
 
-async function tgUploadBuffer(token, method, chatId, buffer, fileName, caption="") {
-  const form = new FormData();
-  form.append("chat_id", String(chatId));
-  form.append(method === "sendVideo" ? "video" : method === "sendPhoto" ? "photo" : "document", new Blob([buffer]), fileName || "resource");
-  if (caption) form.append("caption", String(caption).slice(0,1024));
-  if (contentProtectionEnabled()) form.append("protect_content", "true");
-  const r = await fetch(api(token, method), {method:"POST", body:form});
-  const j = await r.json();
-  if (!j.ok) throw new Error(j.description || method + " failed");
-  if (j.result?.message_id) scheduleAutoDelete(token,chatId,[j.result.message_id]);
-  return j.result;
-}
 function normalizeText(text) {
   return String(text ?? "")
     .replace(/\\n/g, "\n")
@@ -1630,7 +1566,6 @@ async function withUploadLock(key, fn) {
 }
 const finalizingUploads = new Set();
 const childRunners = new Map();
-const UPLOAD_TIMEOUT_MS = UPLOAD_IDLE_SECONDS * 1000;
 
 function askHistoryInput(uid, step, prompt) {
   return new Promise(resolve => {
@@ -1646,17 +1581,6 @@ async function loadTeleproto() {
   TelegramClientClass = mod.TelegramClient;
   StringSessionClass = sessions.StringSession;
   if (!TelegramClientClass || !StringSessionClass) throw new Error("teleproto 模块加载失败");
-}
-
-async function createHistoryClient() {
-  await loadTeleproto();
-  const auth = db.settings.historyAuth || {};
-  const apiId = Number(auth.apiId || TG_API_ID || 0);
-  const apiHash = auth.apiHash ? decrypt(auth.apiHash) : TG_API_HASH;
-  const session = auth.session ? decrypt(auth.session) : (process.env.TG_SESSION || "");
-  if (!apiId || !apiHash) throw new Error("未配置 TG_API_ID / TG_API_HASH");
-  const client = new TelegramClientClass(new StringSessionClass(session), apiId, apiHash, {connectionRetries:5, autoReconnect:true, downloadRetries:8, maxConcurrentDownloads:2, downloadPool:{requestDeadlineMs:120000, requestRetries:8, inflightPerDc:2, maxSessions:2, sessions:2}});
-  return {client, apiId, apiHash};
 }
 
 async function ensureHistoryClient(uid) {
@@ -2291,7 +2215,6 @@ let repositoryMigrationRunning=false;
 let repositoryAutoSyncRunning = false;
 let repositoryAutoSyncQueue = Promise.resolve();
 let repositoryAutoSyncRecoveryTimer = null;
-const repositoryAutoSyncDebounceTimers=new Map();
 function repositoryAutoSyncState() {
   const base={enabled:false,status:"idle",ownerId:"",sourceId:"",targetId:"",sourceTitle:"",targetTitle:"",lastMessageId:0,queue:[],copied:0,failed:0,skipped:0,lastError:"",manualPaused:false,syncText:true,syncPhoto:true,syncVideo:true,syncFiles:true,updatedAt:0};
   const current=db.settings.repositoryAutoSync;
@@ -2300,7 +2223,6 @@ function repositoryAutoSyncState() {
   if(!Array.isArray(db.settings.repositoryAutoSync.queue)) db.settings.repositoryAutoSync.queue=[];
   return db.settings.repositoryAutoSync;
 }
-function repositoryAutoSyncKey(chatId,messageId){return String(chatId)+":"+String(messageId);}
 function repositoryAutoSyncFolderId(sourceItem,targetId){
   const sourceDir=db.directories.find(d=>String(d.id)===String(sourceItem?.directoryId||""));
   const folderName=String(sourceDir?.name||"").trim();
@@ -3325,7 +3247,7 @@ async function cloud123ScanAndUpload(uid, options={}) {
   const started=Date.now();
   let statusMessage=null;
   let success=0, fail=0, skip=0;
-  let activeBatchBytes=0, totalUploadedBytes=0;
+  let totalUploadedBytes=0;
   let currentFileName="";
   let tick=null;
   const uploadProgress = new Map();
@@ -3932,14 +3854,6 @@ function consumeNonMemberQuota(uid,count,reservationAlreadyReleased=false) {
   if(!row || row.date!==today) db.settings.nonMemberDailyUsage[id]={date:today,used:Number(count)||0};
   else row.used=Math.max(0,Number(row.used)||0)+(Number(count)||0);
   saveDb();
-}
-function quotaNoticeText() {
-  return "🎁 <b>今日免费额度已用完</b>\\n\\n非会员每天可免费获取 <b>"+nonMemberDailyLimit()+" 个资源</b>。\\n今日剩余：<b>0</b> 个\\n\\n加入指定会员群后即可继续无限获取。";
-}
-async function sendQuotaNotice(token,chatId,uid,menu) {
-  const remaining=nonMemberDailyRemaining(uid);
-  if(remaining<=0) return sendHtml(token,chatId,quotaNoticeText(),menu||{});
-  return sendHtml(token,chatId,"🎁 <b>非会员免费额度</b>\\n\\n今日还可以免费获取 <b>"+remaining+"</b> 个资源。\\n加入指定会员群后可不限量获取。",menu||{});
 }
 function nonMemberMessage(menu) {
   const text = String(db.settings.nonMemberMessage || "").trim() || "🔐 <b>请先加入指定会员群</b>\\n\\n加入后即可继续使用资源功能。";
@@ -4709,16 +4623,6 @@ function moveFolderMenu(excludeId=null) {
   if(!rows.length) rows.push([{text:"📭 没有其他文件夹",callback_data:"noop"}]);
   rows.push([{text:"❌ 取消",callback_data:"move_cancel"}]);
   return {inline_keyboard:rows};
-}
-function childFolderManageMenu(directoryId) {
-  const d=db.directories.find(x=>String(x.id)===String(directoryId));
-  if(!d) return {inline_keyboard:[[{text:"⬅️ 返回文件夹",callback_data:"admin:upload"}]]};
-  const count=db.resources.filter(r=>String(r.directoryId)===String(d.id)).length;
-  return {inline_keyboard:[
-    [{text:"📤 继续上传",callback_data:"folder_manage_upload:"+d.id}],
-    [{text:"📂 查看资源",callback_data:"folder_manage_view:"+d.id}],
-    [{text:"⬅️ 返回文件夹列表",callback_data:"admin:upload"}]
-  ]};
 }
 function folderManageMenu(directoryId) {
   const d=db.directories.find(x=>String(x.id)===String(directoryId));
@@ -5641,49 +5545,6 @@ function recordRandomHistory(userId, items) {
   db.settings.randomHistory[key]=[...new Set([...existing,...added])].slice(-Math.max(1,validIds.size));
   saveDb();
 }
-function isPermanentResourceError(error) {
-  const msg=String(error?.message||error||"");
-  return /message to copy not found|message not found|message_id_invalid|MESSAGE_ID_INVALID|file.?id.*(?:invalid|wrong|not found)|wrong file(?: identifier)?|message .*?(?:not found|does not exist)|(?:copy|forward).*message.*(?:failed|not found)|message can.?t be copied/i.test(msg);
-}
-
-function removeInvalidResource(item, reason="") {
-  if(!item) return false;
-  const key=resourceKey(item);
-  const before=db.resources.length;
-  db.resources=db.resources.filter(x=>resourceKey(x)!==key);
-
-  if(db.settings.randomHistory && typeof db.settings.randomHistory==="object") {
-    for(const uid of Object.keys(db.settings.randomHistory)) {
-      if(Array.isArray(db.settings.randomHistory[uid])) {
-        db.settings.randomHistory[uid]=db.settings.randomHistory[uid].filter(x=>String(x)!==key);
-      }
-    }
-  }
-  if(db.settings.userFavorites && typeof db.settings.userFavorites==="object") {
-    for(const uid of Object.keys(db.settings.userFavorites)) {
-      if(Array.isArray(db.settings.userFavorites[uid])) {
-        db.settings.userFavorites[uid]=db.settings.userFavorites[uid].filter(x=>String(x)!==key);
-      }
-    }
-  }
-  if(db.settings.userRecent && typeof db.settings.userRecent==="object") {
-    for(const uid of Object.keys(db.settings.userRecent)) {
-      if(Array.isArray(db.settings.userRecent[uid])) {
-        db.settings.userRecent[uid]=db.settings.userRecent[uid].filter(x=>String(x)!==key);
-      }
-    }
-  }
-
-  if(before!==db.resources.length) {
-    if(!Array.isArray(db.settings.mysqlDeletedResources)) db.settings.mysqlDeletedResources=[];
-    db.settings.mysqlDeletedResources=[...new Set([...db.settings.mysqlDeletedResources.map(String),key])].slice(-5000);
-    queueBaserowDeleteResource(item);
-    console.warn("🧹 已清理无效资源：",key,reason ? "| "+String(reason).slice(0,200) : "");
-    saveDb();
-    return true;
-  }
-  return false;
-}
 function resourceInlineKeyboard(items,page=0) {
   const list=Array.isArray(items)?items:[];
   const totalPages=Math.max(1,Math.ceil(list.length/10));
@@ -5713,26 +5574,6 @@ function escapeHtml(value) {
   return String(value??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
 
-async function tgUploadMediaAlbum(token, chatId, entries) {
-  const list=(Array.isArray(entries)?entries:[]).slice(0,10);
-  if(list.length<2) throw new Error("媒体组至少需要 2 个文件");
-  const form=new FormData();
-  form.append("chat_id",String(chatId));
-  if(contentProtectionEnabled()) form.append("protect_content","true");
-  form.append("media",JSON.stringify(list.map((entry,index)=>({
-    type:entry.mediaType,
-    media:"attach://media"+index,
-    ...(entry.caption?{caption:String(entry.caption).slice(0,1024)}:{})
-  }))));
-  list.forEach((entry,index)=>form.append("media"+index,new Blob([entry.buffer]),entry.name||("media"+index)));
-  const response=await fetch(api(token,"sendMediaGroup"),{method:"POST",body:form});
-  const payload=await response.json();
-  if(!payload.ok) throw new Error(payload.description||"sendMediaGroup failed");
-  const sent=Array.isArray(payload.result)?payload.result:[];
-  const ids=sent.map(x=>Number(x?.message_id)).filter(Number.isFinite);
-  if(ids.length) scheduleAutoDelete(token,chatId,ids);
-  return sent;
-}
 async function deliverFromHistory(token,chatId,userId,items,options={}) {
   const member=await allowed(TOKEN,userId);
   if(!Array.isArray(items)||!items.length) return sendHtml(token,chatId,"<b>📭 暂无相关资源</b>\\n\\n暂时没有找到可用内容。",childMenu());
@@ -6642,7 +6483,6 @@ async function mainMessage(msg) {
       }
       states.delete(key);
       await resetRepositoryAutoSyncBinding();
-      const latestSourceMessageId=Math.max(0,...db.resources.filter(x=>String(x.chatId)===String(sc.id)&&Number(x.messageId)>0).map(x=>Number(x.messageId)));
       await enableRepositoryAutoSync(uid,String(sc.id),String(tc.id),String(sc.title||sc.username||sc.id),String(tc.title||tc.username||tc.id),0);
       return await sendHtml(TOKEN,uid,"<b>✅ 自动同步任务已绑定</b>\n━━━━━━━━━━━━━━\n\n📤 旧仓库："+escapeHtml(String(sc.title||sc.username||sc.id))+"\n📥 新仓库："+escapeHtml(String(tc.title||tc.username||tc.id))+"\n\n⏸️ 当前尚未启动同步。\n👇 点击下面的「▶️ 开始同步」后，旧仓库收到的新消息才会自动复制到新仓库。",{reply_markup:{inline_keyboard:[[{text:"▶️ 开始同步",callback_data:"adm:auto_start"}],[{text:"🗑️ 删除任务并解绑",callback_data:"adm:auto_delete"}],[{text:"⬅️ 返回资源管理",callback_data:"admin:resource"}]]}});
     } catch(e) {
@@ -9294,7 +9134,6 @@ function startChild(child){
 let bootActive = false;
 let backgroundTimersStarted = false;
 let sharedBaserowInitStarted = false;
-let sharedBaserowRefreshTimerStarted = false;
 
 async function boot(){
   try { repairLocalFolders(); } catch(e) { console.warn("本地文件夹归类失败:", String(e?.message||e)); }
