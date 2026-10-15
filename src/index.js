@@ -8003,7 +8003,7 @@ async function handleDirectoryCallback(token, q, child=false) {
           [{text:"⬅️ 返回资源管理",callback_data:"admin:resource"}]
         ]}});
     }
-    a.enabled=true;a.status="running";a.updatedAt=Date.now();saveDb();
+    a.enabled=true;a.manualPaused=false;a.lastError="";a.status="running";a.updatedAt=Date.now();saveDb();
     processRepositoryAutoSyncQueue().catch(e=>console.error("❌ 自动同步恢复失败:",String(e?.message||e)));
     return showRepositoryAutoSyncStatus(uid);
   }
