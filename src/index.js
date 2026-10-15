@@ -4789,7 +4789,12 @@ async function finalizeUploadUnlocked(uid, state, token=TOKEN, stateKey=uploadSt
         message_ids:ids,
         protect_content:false
       });
-      if(!Array.isArray(copiedIds)||copiedIds.length!==batch.length) throw new Error("批量转存结果数量不一致");
+      if(!Array.isArray(copiedIds)) {
+        // 请求已返回但结果格式异常：不能再逐条重试，避免批量复制实际成功后产生重复文件。
+        console.warn("⚠️ UPLOAD BATCH COPY RETURN INVALID; skip individual retry to prevent duplicates, count=",batch.length);
+        failed+=batch.length;
+        continue;
+      }
     }catch(e){
       console.warn("⚠️ UPLOAD BATCH COPY FAILED:",e?.message||e,"count=",batch.length);
       for(const entry of batch){
@@ -4820,7 +4825,11 @@ async function finalizeUploadUnlocked(uid, state, token=TOKEN, stateKey=uploadSt
       continue;
     }
 
-    for(let n=0;n<batch.length;n++){
+    if(copiedIds.length!==batch.length) {
+      console.warn("⚠️ UPLOAD BATCH COPY COUNT MISMATCH; skip individual retry to prevent duplicates, expected=",batch.length,"actual=",copiedIds.length);
+      if(copiedIds.length<batch.length) failed+=(batch.length-copiedIds.length);
+    }
+    for(let n=0;n<Math.min(batch.length,copiedIds.length);n++){
       try{
         const copiedId=Number(copiedIds[n]?.message_id??copiedIds[n]);
         if(!Number.isFinite(copiedId)) throw new Error("批量转存消息ID无效");
