@@ -9071,7 +9071,7 @@ async function handleDirectoryCallback(token, q, child=false) {
     });
   }
 
-  const directoryAction=data==="dirs"||data==="user:dirs"||data.startsWith("dirsp:")||data.startsWith("dir:")||data.startsWith("get:");
+  const directoryAction=data==="dirs"||data==="user:dirs"||data.startsWith("dirfilter:")||data.startsWith("dirsp:")||data.startsWith("dir:")||data.startsWith("get:");
   if(directoryAction) await answer("正在打开/发送目录资源…");
 
   if(data==="adm:shared_refresh"){
