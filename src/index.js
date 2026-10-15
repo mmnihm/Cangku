@@ -4198,16 +4198,15 @@ function quotaSettingsText(){return"<b>🎁 会员 / 非会员每日资源额度
 
 function userHomeInlineKeyboard() {
   return {reply_markup:{inline_keyboard:[
-    [{text:"📂 资源目录",callback_data:"user:dirs"},{text:"🔎 搜索资源",callback_data:"user:search"}],
-    [{text:"🎲 随机获取",callback_data:"user:random"},{text:"🆕 最新资源",callback_data:"user:latest"}],
-    [{text:"🎟️ 兑换码",callback_data:"user:redeem"},{text:"💬 联系客服",callback_data:"support:start"}]
+    [{text:"🆕 最新资源",callback_data:"user:latest"},{text:"👤 个人中心",callback_data:"user:profile"}],
+    [{text:"🎟️ 兑换码",callback_data:"user:redeem"},{text:"💬 联系客服",callback_data:"support:start"}],
+    [{text:"🏠 返回首页",callback_data:"user:home"}]
   ]}};
 }
 function userHomeReplyKeyboard() {
   return {reply_markup:{keyboard:[
     ["📂 资源目录","🔎 搜索资源"],
-    ["🎲 随机获取","🆕 最新资源"],
-    ["🎟️ 兑换码","💬 联系客服"]
+    ["🎲 随机获取","👤 个人中心"]
   ],resize_keyboard:true,is_persistent:true}};
 }
 function userMenu() {
@@ -4226,9 +4225,29 @@ function userHomeText(uid) {
   return "<b>🏠 资源平台</b>\n━━━━━━━━━━━━━━\n\n" +
     "📚 <b>资源总量：</b>" + db.resources.length + " 条\n" +
     "📁 <b>可浏览文件夹：</b>" + folderCount + " 个\n" + quota + "\n\n" +
-    "📂 目录浏览 · 🔎 关键词搜索\n🎲 随机获取 · 🆕 最新资源\n\n" +
-    "👇 <i>选择下方按钮开始使用</i>";
+    "📂 目录浏览 · 🔎 关键词搜索\n🎲 随机获取 · 👤 个人中心\n\n" +
+    "🆕 最新资源、🎟️ 兑换码和💬 客服可在页面内打开。\n\n" +
+    "👇 <i>请选择下方四个固定按钮</i>";
 }
+function userProfileText(uid) {
+  const groupMember = cachedRequiredGroupMembership(uid)===true;
+  const premium = isAdmin(uid) || hasActivePremiumMembership(uid) || groupMember;
+  const remaining = Math.max(0, Number(nonMemberDailyRemaining(uid)) || 0);
+  const limit = Math.max(0, Number(nonMemberDailyLimit()) || 0);
+  return "<b>👤 个人中心</b>\n━━━━━━━━━━━━━━\n\n" +
+    "🆔 用户 ID：<code>" + escapeHtml(String(uid)) + "</code>\n" +
+    (premium
+      ? "💎 会员权益：<b>已生效</b>\n🎁 今日获取额度：<b>不限量</b>\n"
+      : "💳 会员状态：<b>普通用户</b>\n🎁 今日免费额度：<b>" + remaining + " / " + limit + "</b> 个\n") +
+    "\n📌 可在此使用兑换码、查看最新资源或联系在线客服。";
+}
+function userProfileInlineKeyboard() {
+  return {inline_keyboard:[
+    [{text:"🆕 最新资源",callback_data:"user:latest"},{text:"🎟️ 使用兑换码",callback_data:"user:redeem"}],
+    [{text:"💬 联系客服",callback_data:"support:start"},{text:"🏠 返回首页",callback_data:"user:home"}]
+  ]};
+}
+
 function uploadBottomKeyboard() { return {reply_markup:{keyboard:[["▶️ 继续上传","✅ 结束上传"],["❌ 取消上传"]],resize_keyboard:true,is_persistent:true}}; }
 function childAdminMenu() {
   return {reply_markup:{inline_keyboard:[
@@ -4982,36 +5001,56 @@ function directoryKeyboard() {
   return {reply_markup:{keyboard:rows,resize_keyboard:true,input_field_placeholder:"选择文件夹"}};
 }
 
-function directoryInlineKeyboard(page=0) {
-  // 先一次遍历统计每个文件夹的资源数，避免“每个文件夹都扫描全部资源”的重复 O(文件夹×资源) 开销。
-  const counts=new Map();
+function directoryListing(filter="all") {
+  const normalized=["videos","albums"].includes(String(filter))?String(filter):"all";
+  const byDirectory=new Map();
   for(const r of db.resources) {
     if(r?.directoryId===undefined || r?.directoryId===null) continue;
     const key=String(r.directoryId);
-    counts.set(key,(counts.get(key)||0)+1);
+    if(!byDirectory.has(key)) byDirectory.set(key,[]);
+    byDirectory.get(key).push(r);
   }
-  const all=sortedDirectories(db.directories.filter(d=>(counts.get(String(d.id))||0)>0));
+  const counts=new Map();
+  const activeDirectories=sortedDirectories(db.directories.filter(d=>{
+    const items=byDirectory.get(String(d.id))||[];
+    const summary=directoryResourceCounts(items);
+    const count=normalized==="videos"?summary.videos:normalized==="albums"?summary.albums:items.length;
+    if(count>0) counts.set(String(d.id),count);
+    return count>0;
+  }));
+  return {filter:normalized,counts,activeDirectories};
+}
+function directoryInlineKeyboard(page=0,filter="all") {
+  const listing=directoryListing(filter);
+  const normalized=listing.filter;
+  const all=listing.activeDirectories;
+  const counts=listing.counts;
   const pageSize=10;
   const maxPage=Math.max(0,Math.ceil(all.length/pageSize)-1);
   const currentPage=Math.min(Math.max(0,Number(page)||0),maxPage);
   const start=currentPage*pageSize;
   const current=all.slice(start,start+pageSize);
-  const rows=[];
+  const rows=[[
+    {text:normalized==="all"?"✅ 全部目录":"全部目录",callback_data:"dirfilter:all"},
+    {text:normalized==="videos"?"✅ 视频":"🎬 视频",callback_data:"dirfilter:videos"},
+    {text:normalized==="albums"?"✅ 相册":"🖼️ 相册",callback_data:"dirfilter:albums"}
+  ]];
   let row=[];
-  for(const d of current){
+  for(const d of current) {
     const count=counts.get(String(d.id))||0;
     row.push({text:"📁 "+String(d.name||"未命名").slice(0,18)+" · "+count,callback_data:"dir:"+d.id+":0"});
-    if(row.length===3){ rows.push(row); row=[]; }
+    if(row.length===3) { rows.push(row); row=[]; }
   }
   if(row.length) rows.push(row);
-  if(!rows.length) rows.push([{text:"📭 暂无分类",callback_data:"noop"}]);
+  if(!current.length) rows.push([{text:"📭 当前分类暂无目录",callback_data:"noop"}]);
   const nav=[];
-  if(start>0) nav.push({text:"⬅️ 上一页",callback_data:"dirsp:"+(currentPage-1)});
-  if(start+pageSize<all.length) nav.push({text:"下一页 ➡️",callback_data:"dirsp:"+(currentPage+1)});
+  if(start>0) nav.push({text:"⬅️ 上一页",callback_data:"dirsp:"+normalized+":"+(currentPage-1)});
+  if(start+pageSize<all.length) nav.push({text:"下一页 ➡️",callback_data:"dirsp:"+normalized+":"+(currentPage+1)});
   if(nav.length) rows.push(nav);
-  rows.push([{text:"⬅️ 返回首页",callback_data:"user:home"}]);
+  rows.push([{text:"🆕 最新资源",callback_data:"user:latest"},{text:"🏠 返回首页",callback_data:"user:home"}]);
   return {inline_keyboard:rows};
 }
+
 function folderSummaryKeyboard(directoryId,count,offset=0) {
   const rows=[];
   if(offset<count) {
@@ -5146,34 +5185,30 @@ async function sendDirectoryBatch(token, chatId, items) {
     return {sent:0,sentItems:[]};
   }
 }
-function directoryText(page=0) {
-  const counts = new Map();
-  for (const r of db.resources) {
-    if (r?.directoryId === undefined || r?.directoryId === null) continue;
-    const key = String(r.directoryId);
-    counts.set(key, (counts.get(key) || 0) + 1);
-  }
-  // 与目录按钮使用相同的排序规则，保证页码和实际展示顺序一致。
-  const activeDirectories = sortedDirectories(
-    db.directories.filter(d => (counts.get(String(d.id)) || 0) > 0)
-  );
-  const pageSize = 10;
-  const pages = Math.max(1, Math.ceil(activeDirectories.length / pageSize));
-  const current = Math.min(Math.max(0, Number(page) || 0), pages - 1);
-  const first = activeDirectories.length ? current * pageSize + 1 : 0;
-  const last = Math.min((current + 1) * pageSize, activeDirectories.length);
+function directoryText(page=0,filter="all") {
+  const listing=directoryListing(filter);
+  const normalized=listing.filter;
+  const activeDirectories=listing.activeDirectories;
+  const pageSize=10;
+  const pages=Math.max(1,Math.ceil(activeDirectories.length/pageSize));
+  const current=Math.min(Math.max(0,Number(page)||0),pages-1);
+  const first=activeDirectories.length?current*pageSize+1:0;
+  const last=Math.min((current+1)*pageSize,activeDirectories.length);
+  const filterLabel=normalized==="videos"?"视频":normalized==="albums"?"相册":"全部目录";
   return [
     "📂 <b>资源目录</b>",
     "━━━━━━━━━━━━━━",
     "",
-    "📚 资源记录：<b>" + db.resources.length + "</b> 条",
-    "📁 可浏览文件夹：<b>" + activeDirectories.length + "</b> 个",
-    "📄 当前页：<b>" + (current + 1) + " / " + pages + "</b>",
-    activeDirectories.length ? "🗂️ 本页显示：<b>" + first + "–" + last + "</b> 个文件夹" : "",
+    "🔎 当前筛选：<b>"+filterLabel+"</b>",
+    "📚 资源记录：<b>"+db.resources.length+"</b> 条",
+    "📁 符合条件的文件夹：<b>"+activeDirectories.length+"</b> 个",
+    "📄 当前页：<b>"+(current+1)+" / "+pages+"</b>",
+    activeDirectories.length?"🗂️ 本页显示：<b>"+first+"–"+last+"</b> 个文件夹":"",
     "",
-    activeDirectories.length ? "👇 <i>点击文件夹名称查看资源</i>" : "📭 <i>暂时没有可浏览的文件夹，请稍后再试</i>"
-  ].filter(line => line !== "").join("\\n");
+    activeDirectories.length?"👇 <i>点击文件夹名称查看资源，或切换上方筛选</i>":"📭 <i>当前分类暂时没有可浏览的文件夹，可切换筛选类型</i>"
+  ].filter(line=>line!=="").join("\n");
 }
+
 function configText() {
   const g = group(), r = repo(), scan = db.settings.historyScan || {};
   return [
@@ -6445,6 +6480,11 @@ async function mainMessage(msg) {
     }
   }
 
+  if(String(t||"").replace(/[\uFE0E\uFE0F]/g,"").replace(/\s+/g,"").trim()==="👤个人中心" && !admin) {
+    states.delete(key);
+    return sendHtml(TOKEN,uid,userProfileText(uid),{reply_markup:userProfileInlineKeyboard()});
+  }
+
   // 搜索输入必须优先于会员检查、共享刷新和其他状态机处理。
   // 避免搜索页面已经打开，但用户发送关键词后被其他流程拦截而“没有反馈”。
   if((s?.step==="search" || s?.step==="search_results") && msg.chat?.type==="private" && !admin) {
@@ -7049,7 +7089,7 @@ async function mainMessage(msg) {
       "请输入关键词，例如：作者名、标题或关键词。\\n\\n"+
       "💡 支持模糊搜索，结果较多时可使用分页。\\n"+
       "↩️ 发送 <code>/cancel</code> 可退出搜索。",
-      {reply_markup:{keyboard:[["❌ 取消搜索"],["🏠 开始"]],resize_keyboard:true,input_field_placeholder:"请输入搜索关键词"}}
+      userMenu()
     );
   }
   if(t==="🎲 随机获取") {
@@ -7724,6 +7764,10 @@ async function childMessage(child,msg,token) {
     if(!db.directories.length) return sendHtml(token,uid,"<b>📂 暂无资源目录</b>\n\n管理员创建目录后，所有机器人会自动同步看到。",childMenu());
     return sendHtml(token,uid,directoryText(),{reply_markup:directoryInlineKeyboard()});
   }
+  if(String(t||"").replace(/[\uFE0E\uFE0F]/g,"").replace(/\s+/g,"").trim()==="👤个人中心") {
+    states.delete(key);
+    return sendHtml(token,uid,userProfileText(uid),{reply_markup:userProfileInlineKeyboard()});
+  }
   if(t==="🔎 搜索资源"){
     states.set(key,{step:"search"});
     return sendHtml(token,uid,"<b>🔎 搜索资源</b>\n\n请输入关键词，例如：作者名、标题或关键词。\n\n发送 /cancel 可取消。");
@@ -7916,6 +7960,19 @@ async function handleDirectoryCallback(token, q, child=false) {
       states.set(key,{step:"redeem_code_input"});
       await answer("请发送兑换码");
       return sendHtml(token,uid,"<b>🎟️ 使用兑换码</b>\n━━━━━━━━━━━━━━\n\n请发送你的兑换码。\n也可以直接发送 <code>/redeem 兑换码</code>。\n发送 /cancel 可取消。",child?childMenu():userMenu());
+    }
+    if(action==="profile") {
+      await answer("正在打开个人中心");
+      const profileText=userProfileText(uid);
+      const edited=await safeEdit(token,{
+        chat_id:chatId,
+        message_id:messageId,
+        text:profileText,
+        parse_mode:"HTML",
+        reply_markup:userProfileInlineKeyboard()
+      });
+      if(edited) return edited;
+      return sendHtml(token,chatId,profileText,{reply_markup:userProfileInlineKeyboard()});
     }
     if(action==="search") {
       const key=child ? uploadStateKey(uid,true,token) : "m:"+uid;
@@ -9038,14 +9095,28 @@ async function handleDirectoryCallback(token, q, child=false) {
   }
   if(data==="done") return;
 
-  if(data.startsWith("dirsp:")) {
-    const page=Math.max(0,Number(data.slice(6))||0);
+  if(data.startsWith("dirfilter:")) {
+    const filter=String(data.slice("dirfilter:".length)||"all");
+    const safeFilter=["all","videos","albums"].includes(filter)?filter:"all";
     return safeEdit(token,{
       chat_id:chatId,
       message_id:messageId,
-      text:directoryText(page),
+      text:directoryText(0,safeFilter),
       parse_mode:"HTML",
-      reply_markup:directoryInlineKeyboard(page)
+      reply_markup:directoryInlineKeyboard(0,safeFilter)
+    });
+  }
+
+  if(data.startsWith("dirsp:")) {
+    const parts=data.split(":");
+    const filter=parts.length>=3 && ["all","videos","albums"].includes(parts[1])?parts[1]:"all";
+    const page=Math.max(0,Number(parts.length>=3?parts[2]:parts[1])||0);
+    return safeEdit(token,{
+      chat_id:chatId,
+      message_id:messageId,
+      text:directoryText(page,filter),
+      parse_mode:"HTML",
+      reply_markup:directoryInlineKeyboard(page,filter)
     });
   }
 
@@ -9053,9 +9124,9 @@ async function handleDirectoryCallback(token, q, child=false) {
     return safeEdit(token,{
       chat_id:chatId,
       message_id:messageId,
-      text:directoryText(),
+      text:directoryText(0,"all"),
       parse_mode:"HTML",
-      reply_markup:directoryInlineKeyboard()
+      reply_markup:directoryInlineKeyboard(0,"all")
     });
   }
 
