@@ -230,6 +230,16 @@ export async function initializeMySQL(db) {
       Object.assign(db,merged);
     }
 
+    // 删除标记优先于旧 JSON / bot_state 快照，避免本地旧副本把已失效资源重新合并回来。
+    const tombstoneKeys=new Set([
+      ...(Array.isArray(remoteState?.settings?.mysqlDeletedResources)?remoteState.settings.mysqlDeletedResources:[]),
+      ...(Array.isArray(db.settings?.mysqlDeletedResources)?db.settings.mysqlDeletedResources:[])
+    ].map(String));
+    if(tombstoneKeys.size) {
+      if(!db.settings || typeof db.settings!=="object") db.settings={};
+      db.settings.mysqlDeletedResources=[...tombstoneKeys].slice(-5000);
+      if(Array.isArray(db.resources)) db.resources=db.resources.filter(x=>!tombstoneKeys.has(resourceKey(x)));
+    }
     const [fr]=await pool.query("SELECT data FROM folders WHERE status <> 'deleted'");
     const [rr]=await pool.query("SELECT data FROM resources WHERE status <> 'deleted'");
     const fm=new Map((Array.isArray(db.directories)?db.directories:[]).map(x=>[String(x?.id||""),x]));
