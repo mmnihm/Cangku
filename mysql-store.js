@@ -6,6 +6,7 @@ let ready = false;
 let writeQueue = Promise.resolve();
 let pendingSnapshot = null;
 let writeRunning = false;
+const processedDeletionKeys = new Set();
 
 function envBool(v, fallback=false) {
   const s=String(v ?? "").trim().toLowerCase();
@@ -161,12 +162,21 @@ async function persistNormalized(db) {
       if(!r?.chatId) continue;
       await conn.execute("INSERT INTO repositories (chat_id,title,username,repo_type,status,data,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE title=VALUES(title),username=VALUES(username),repo_type=VALUES(repo_type),status=VALUES(status),data=VALUES(data),updated_at=VALUES(updated_at)",[String(r.chatId),String(r.title||"").slice(0,1000),String(r.username||""),String(r.type||r.repoType||""),r.status||"active",JSON.stringify(r),Number(r.createdAt||Date.now()),Date.now()]);
     }
+    const currentResourceKeys=new Set((Array.isArray(db.resources)?db.resources:[]).map(resourceKey));
+    const pendingDeletedKeys=[];
+    for(const rawKey of Array.isArray(db.settings?.mysqlDeletedResources)?db.settings.mysqlDeletedResources:[]) {
+      const key=String(rawKey||"");
+      if(!key || currentResourceKeys.has(key) || processedDeletionKeys.has(key)) continue;
+      await conn.execute("UPDATE resources SET status='deleted',updated_at=? WHERE resource_key=?",[Date.now(),key]);
+      pendingDeletedKeys.push(key);
+    }
     const task=db.settings?.repositoryAutoSync;
     if(task?.sourceId || task?.targetId) {
       const taskKey=String(task.sourceId||"")+":"+String(task.targetId||"");
       await conn.execute("INSERT INTO sync_tasks (task_key,source_chat_id,target_chat_id,status,last_message_id,queued,copied,skipped,failed,last_error,data,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?, ?,?) ON DUPLICATE KEY UPDATE source_chat_id=VALUES(source_chat_id),target_chat_id=VALUES(target_chat_id),status=VALUES(status),last_message_id=VALUES(last_message_id),queued=VALUES(queued),copied=VALUES(copied),skipped=VALUES(skipped),failed=VALUES(failed),last_error=VALUES(last_error),data=VALUES(data),updated_at=VALUES(updated_at)",[taskKey,String(task.sourceId||""),String(task.targetId||""),String(task.status||"idle"),Number(task.lastMessageId||0),Number(task.queue?.length||0),Number(task.copied||0),Number(task.skipped||0),Number(task.failed||0),String(task.lastError||""),JSON.stringify(task),Date.now(),Date.now()]);
     }
     await conn.commit();
+    for(const key of pendingDeletedKeys) processedDeletionKeys.add(key);
   } catch(e) { try { await conn.rollback(); } catch {} throw e; } finally { conn.release(); }
 }
 
