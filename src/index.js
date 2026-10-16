@@ -6176,7 +6176,14 @@ async function supportHandleAdminReply(token,msg) {
   supportRememberToken(token);
   if(!isAdmin(msg.from?.id) || !msg.reply_to_message?.message_id) return false;
   const route=supportFindRoute(token,msg.chat?.id,msg.reply_to_message.message_id);
-  if(!route) return false;
+  if(!route) {
+    console.warn("⚠️ 客服回复路由未匹配:",{
+      adminChatId:String(msg.chat?.id||""),
+      replyMessageId:Number(msg.reply_to_message.message_id||0),
+      tokenFingerprint:tokenFingerprint(token)
+    });
+    return false;
+  }
   if(!supportIsOpen(token,route.userId)) {
     await sendHtml(token,msg.chat.id,"⚠️ 这个客服会话已经结束，消息没有转发给用户。");
     return true;
@@ -6395,6 +6402,8 @@ async function backupRecoveryMerge(uid) {
 }
 
 async function mainMessage(msg) {
+  // 客服回复必须先于绑定、上传、兑换码等状态机处理，避免管理员回复被其他流程截走。
+  if(msg.chat?.type==="private" && isAdmin(msg.from?.id) && await supportHandleAdminReply(TOKEN,msg)) return;
   // 上传状态由下方统一处理；这里不做空分支判断。
   // Telegram 消息处理不能等待 Google Sheets；共享数据在后台同步。
   if(await binding(msg)) return;
@@ -6587,8 +6596,6 @@ async function mainMessage(msg) {
     if(handled) return;
   }
 
-  // 管理员回复客服转发消息时，优先走客服回传，不进入普通后台状态机。
-  if(admin && await supportHandleAdminReply(TOKEN,msg)) return;
   // 用户处于客服会话时，普通消息直接转交客服。
   if(!admin && await supportHandleUserMessage(TOKEN,msg)) return;
 
@@ -7711,6 +7718,8 @@ async function childMessage(child,msg,token) {
   // 子机器人消息处理不能等待 Google Sheets，避免 /start 和菜单被共享同步卡住。
   if(msg.chat?.type!=="private") return;
   const uid=msg.from.id;
+  // 客服回复必须先于兑换码、上传等状态机处理，避免管理员回复被其他流程截走。
+  if(isAdmin(uid) && await supportHandleAdminReply(token,msg)) return;
   if(!isAdmin(uid) && db.settings?.redeemAccessBans?.[String(uid)]) return sendHtml(token,uid,"⛔ <b>此账号已被禁止使用机器人。</b>\n如有疑问，请联系管理员。");
   await ensureUserInlineMode(token, uid);
   // 子机器人上传状态与回调统一使用 token-aware key，多个子机器人互不串任务。
@@ -7749,8 +7758,6 @@ async function childMessage(child,msg,token) {
     if(handled) return;
   }
 
-  // 子机器人也支持在线客服：管理员回复机器人转发的消息即可回传用户。
-  if(isAdmin(uid) && await supportHandleAdminReply(token,msg)) return;
   if(!isAdmin(uid) && await supportHandleUserMessage(token,msg)) return;
   const startCommand=t.split(" ")[0].split("@")[0];
 
