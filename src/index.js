@@ -5016,7 +5016,19 @@ async function finalizeUpload(uid, state, token=TOKEN, stateKey=uploadStateKey(u
     if(options.callbackMessage?.chat_id && options.callbackMessage?.message_id) {
       await safeEdit(token,{chat_id:options.callbackMessage.chat_id,message_id:options.callbackMessage.message_id,text:statusText,parse_mode:"HTML",reply_markup:{inline_keyboard:[]}}).catch(()=>{});
     } else {
-      await sendHtml(token,uid,statusText,{reply_markup:{remove_keyboard:true}}).catch(()=>{});
+      // Reply-keyboard completion must reuse the existing upload control message.
+      // Sending a separate "received/processing" message here creates a second
+      // upload notice before finalizeUploadUnlocked posts/edits the final result.
+      const controlId=Number(state.controlMessageId||0);
+      if(controlId>0) {
+        await safeEdit(token,{
+          chat_id:uid,
+          message_id:controlId,
+          text:statusText,
+          parse_mode:"HTML",
+          reply_markup:{inline_keyboard:[]}
+        }).catch(()=>{});
+      }
     }
     return await finalizeUploadUnlocked(uid,state,token,stateKey,menu);
   } finally {
