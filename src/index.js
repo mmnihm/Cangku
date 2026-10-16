@@ -4240,6 +4240,7 @@ function userProfileText(uid) {
 }
 function userProfileInlineKeyboard() {
   return {inline_keyboard:[
+    [{text:"💎 购买会员",url:"https://t.me/vbjju96bot?start=buy_1018"}],
     [{text:"🆕 最新资源",callback_data:"user:latest"},{text:"🎟️ 使用兑换码",callback_data:"user:redeem"}],
     [{text:"💬 联系客服",callback_data:"support:start"},{text:"🏠 返回首页",callback_data:"user:home"}]
   ]};
