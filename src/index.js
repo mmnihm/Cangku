@@ -4172,6 +4172,7 @@ function adminResourceInline(){return{inline_keyboard:[
 function adminSettingsInline(){return{inline_keyboard:[
  [{text:"🔐 指定群管理",callback_data:"adm:group"},{text:"👥 管理员管理",callback_data:"adm:admins"}],
  [{text:"🎁 会员/配额设置",callback_data:"adm:quota"},{text:"🎟️ 兑换码管理",callback_data:"adm:redeem"}],
+ [{text:"💎 购买会员链接",callback_data:"adm:membership_link"}],
  [{text:"🛡️ 内容保护",callback_data:"adm:protect"}],
  [{text:"⬅️ 返回管理",callback_data:"admin:root"}]
 ]};}
@@ -4238,12 +4239,19 @@ function userProfileText(uid) {
       : "💳 会员状态：<b>普通用户</b>\n🎁 今日免费额度：<b>" + remaining + " / " + limit + "</b> 个\n") +
     "\n📌 可在此使用兑换码、查看最新资源或联系在线客服。";
 }
+function membershipPurchaseUrl() {
+  if (Object.prototype.hasOwnProperty.call(db.settings || {}, "membershipPurchaseUrl")) {
+    return String(db.settings.membershipPurchaseUrl || "").trim();
+  }
+  return "https://t.me/vbjju96bot?start=buy_1018";
+}
 function userProfileInlineKeyboard() {
-  return {inline_keyboard:[
-    [{text:"💎 购买会员",url:"https://t.me/vbjju96bot?start=buy_1018"}],
-    [{text:"🆕 最新资源",callback_data:"user:latest"},{text:"🎟️ 使用兑换码",callback_data:"user:redeem"}],
-    [{text:"💬 联系客服",callback_data:"support:start"},{text:"🏠 返回首页",callback_data:"user:home"}]
-  ]};
+  const rows=[];
+  const purchaseUrl=membershipPurchaseUrl();
+  if (purchaseUrl) rows.push([{text:"💎 购买会员",url:purchaseUrl}]);
+  rows.push([{text:"🆕 最新资源",callback_data:"user:latest"},{text:"🎟️ 使用兑换码",callback_data:"user:redeem"}]);
+  rows.push([{text:"💬 联系客服",callback_data:"support:start"},{text:"🏠 返回首页",callback_data:"user:home"}]);
+  return {inline_keyboard:rows};
 }
 
 function uploadBottomKeyboard() { return {reply_markup:{keyboard:[["▶️ 继续上传","✅ 结束上传"],["❌ 取消上传"]],resize_keyboard:true,is_persistent:true}}; }
@@ -6619,6 +6627,27 @@ async function mainMessage(msg) {
     saveDb(); states.delete(key);
     return sendHtml(TOKEN,uid,"✅ 备份机器人已保存：@"+escapeHtml(me.username||"")+"\n\n请先给它发一次 /start。之后新入库的文件会静默备份。",adminMenu());
   }
+  if(admin && s?.step==="membership_purchase_link") {
+    const value=String(t||"").trim();
+    if(value==="/cancel") {
+      states.delete(key);
+      return sendHtml(TOKEN,uid,"↩️ 已取消，购买会员链接保持不变。",adminSettingsMenu());
+    }
+    if(value==="0") {
+      db.settings.membershipPurchaseUrl="";
+    } else {
+      let parsed;
+      try { parsed=new URL(value); } catch {}
+      if(!parsed || !["http:","https:"].includes(parsed.protocol)) {
+        return sendHtml(TOKEN,uid,"⚠️ 链接格式不正确。请发送完整的 https:// 或 http:// 链接；发送 0 可隐藏购买按钮，发送 /cancel 可取消。");
+      }
+      db.settings.membershipPurchaseUrl=value;
+    }
+    saveDb();
+    states.delete(key);
+    logAdmin(uid,"设置购买会员链接",value==="0"?"已隐藏购买会员按钮":db.settings.membershipPurchaseUrl);
+    return sendHtml(TOKEN,uid,value==="0"?"✅ 已隐藏个人中心的购买会员按钮。":"✅ 购买会员链接已保存。\n\n新链接：\n"+escapeHtml(db.settings.membershipPurchaseUrl),adminSettingsMenu());
+  }
   if(admin && s?.step==="support_link") {
     const value=String(t||"").trim();
     if(value==="0") db.settings.supportLink="";
@@ -8412,6 +8441,12 @@ async function handleDirectoryCallback(token, q, child=false) {
     if(data==="admin:resource")return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>📦 资源管理</b>\n━━━━━━━━━━━━━━\n\n👇 请选择操作",parse_mode:"HTML",reply_markup:adminResourceInline()});
     if(data==="admin:ops")return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>📊 数据与运营</b>\n━━━━━━━━━━━━━━\n\n👇 请选择操作",parse_mode:"HTML",reply_markup:adminOpsInline()});
     if(data==="admin:settings")return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>⚙️ 系统设置</b>\n━━━━━━━━━━━━━━\n\n👇 请选择设置",parse_mode:"HTML",reply_markup:adminSettingsInline()});
+    if(data==="adm:membership_link") {
+      states.set("m:"+uid,{step:"membership_purchase_link"});
+      const current=membershipPurchaseUrl();
+      await answer("请发送购买会员链接");
+      return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>💎 设置购买会员链接</b>\n━━━━━━━━━━━━━━\n\n当前链接：\n"+(current?"<code>"+escapeHtml(current)+"</code>":"<i>未设置（购买按钮隐藏）</i>")+"\n\n请发送新的完整链接（https:// 或 http:// 开头）。\n发送 <code>0</code> 可隐藏个人中心的购买会员按钮。\n发送 <code>/cancel</code> 可取消。",parse_mode:"HTML",reply_markup:{inline_keyboard:[[{text:"↩️ 取消并返回",callback_data:"admin:settings"}]]}});
+    }
     if(data==="admin:bot")return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>🤖 机器人管理</b>\n━━━━━━━━━━━━━━\n\n👇 请选择操作",parse_mode:"HTML",reply_markup:adminBotInline()});
     if(data==="admin:maintenance")return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>🧹 资源维护</b>\n━━━━━━━━━━━━━━\n\n👇 选择检查项目",parse_mode:"HTML",reply_markup:adminMaintenanceMenu()});
     if(data==="admin:health")return safeEdit(token,{chat_id:chatId,message_id:messageId,text:systemHealthText(),parse_mode:"HTML",reply_markup:{inline_keyboard:[[{text:"🔄 重新检查",callback_data:"admin:health"}],[{text:"⬅️ 返回维护",callback_data:"admin:maintenance"}]]}});
