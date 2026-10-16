@@ -4173,6 +4173,7 @@ function adminSettingsInline(){return{inline_keyboard:[
  [{text:"🔐 指定群管理",callback_data:"adm:group"},{text:"👥 管理员管理",callback_data:"adm:admins"}],
  [{text:"🎁 会员/配额设置",callback_data:"adm:quota"},{text:"🎟️ 兑换码管理",callback_data:"adm:redeem"}],
  [{text:"💎 购买会员链接",callback_data:"adm:membership_link"}],
+ [{text:"💬 客服机器人链接",callback_data:"adm:support_link"}],
  [{text:"🛡️ 内容保护",callback_data:"adm:protect"}],
  [{text:"⬅️ 返回管理",callback_data:"admin:root"}]
 ]};}
@@ -4197,7 +4198,7 @@ function quotaSettingsText(){return"<b>🎁 会员 / 非会员每日资源额度
 function userHomeInlineKeyboard() {
   return {reply_markup:{inline_keyboard:[
     [{text:"🆕 最新资源",callback_data:"user:latest"},{text:"👤 个人中心",callback_data:"user:profile"}],
-    [{text:"🎟️ 兑换码",callback_data:"user:redeem"},{text:"💬 联系客服",callback_data:"support:start"}],
+    [{text:"🎟️ 兑换码",callback_data:"user:redeem"},supportLink()?{text:"💬 联系客服",url:supportLink()}:{text:"💬 联系客服",callback_data:"support:start"}],
     [{text:"🏠 返回首页",callback_data:"user:home"}]
   ]}};
 }
@@ -4250,7 +4251,7 @@ function userProfileInlineKeyboard() {
   const purchaseUrl=membershipPurchaseUrl();
   if (purchaseUrl) rows.push([{text:"💎 购买会员",url:purchaseUrl}]);
   rows.push([{text:"🆕 最新资源",callback_data:"user:latest"},{text:"🎟️ 使用兑换码",callback_data:"user:redeem"}]);
-  rows.push([{text:"💬 联系客服",callback_data:"support:start"},{text:"🏠 返回首页",callback_data:"user:home"}]);
+  rows.push([supportLink()?{text:"💬 联系客服",url:supportLink()}:{text:"💬 联系客服",callback_data:"support:start"},{text:"🏠 返回首页",callback_data:"user:home"}]);
   return {inline_keyboard:rows};
 }
 
@@ -6669,12 +6670,20 @@ async function mainMessage(msg) {
   }
   if(admin && s?.step==="support_link") {
     const value=String(t||"").trim();
+    if(value==="/cancel") {
+      states.delete(key);
+      return sendHtml(TOKEN,uid,"↩️ 已取消，客服链接保持不变。",adminSettingsMenu());
+    }
     if(value==="0") db.settings.supportLink="";
-    else if(!/^https?:\/\//i.test(value)) return sendHtml(TOKEN,uid,"⚠️ 请发送以 http:// 或 https:// 开头的链接。发送 0 可清除。");
-    else db.settings.supportLink=value;
+    else {
+      let parsed;
+      try { parsed=new URL(value); } catch {}
+      if(!parsed || !["http:","https:"].includes(parsed.protocol)) return sendHtml(TOKEN,uid,"⚠️ 链接格式不正确。请发送完整的 https:// 或 http:// 链接；发送 0 可清除，发送 /cancel 可取消。");
+      db.settings.supportLink=value;
+    }
     saveDb();
     states.delete(key);
-    return sendHtml(TOKEN,uid,"✅ 客服链接已保存。用户点「联系客服」就能看到。",adminMenu());
+    return sendHtml(TOKEN,uid,value==="0"?"✅ 已清除客服机器人链接，用户将恢复使用当前机器人的内部客服。":"✅ 客服机器人链接已保存。用户点击「联系客服」将直接跳转到外部客服机器人。\\n\\n链接：\\n"+escapeHtml(db.settings.supportLink),adminSettingsMenu());
   }
   if(admin && s?.step==="auto_start_id") {
     const startId=Number(String(t||"").trim());
@@ -8172,6 +8181,15 @@ async function handleDirectoryCallback(token, q, child=false) {
   }
 
   if(data==="support:start") {
+    const externalSupportLink=supportLink();
+    if(externalSupportLink) {
+      return safeEdit(token,{chat_id:chatId,message_id:messageId,
+        text:"<b>💬 联系客服</b>\\n━━━━━━━━━━━━━━\\n\\n点击下方按钮，前往客服机器人咨询。\\n\\n如需返回资源仓库，请点击返回首页。",
+        parse_mode:"HTML",reply_markup:{inline_keyboard:[
+          [{text:"🔗 打开客服机器人",url:externalSupportLink}],
+          [{text:"🏠 返回首页",callback_data:"user:home"}]
+        ]}});
+    }
     supportOpenSession(token,uid);
     return safeEdit(token,{chat_id:chatId,message_id:messageId,
       text:"<b>💬 在线客服</b>\\n━━━━━━━━━━━━━━\\n\\n👋 你已进入客服会话\\n\\n📨 直接发送问题、文字、图片、视频或文件即可。\\n💬 客服回复后会自动发送给你。\\n\\n📌 需要结束时，点击下方「❌ 结束客服」。",
@@ -8460,6 +8478,12 @@ async function handleDirectoryCallback(token, q, child=false) {
     if(data==="admin:resource")return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>📦 资源管理</b>\n━━━━━━━━━━━━━━\n\n👇 请选择操作",parse_mode:"HTML",reply_markup:adminResourceInline()});
     if(data==="admin:ops")return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>📊 数据与运营</b>\n━━━━━━━━━━━━━━\n\n👇 请选择操作",parse_mode:"HTML",reply_markup:adminOpsInline()});
     if(data==="admin:settings")return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>⚙️ 系统设置</b>\n━━━━━━━━━━━━━━\n\n👇 请选择设置",parse_mode:"HTML",reply_markup:adminSettingsInline()});
+    if(data==="adm:support_link" || data==="support:link") {
+      states.set("m:"+uid,{step:"support_link"});
+      const current=supportLink();
+      await answer("请发送客服机器人链接");
+      return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>💬 设置客服机器人链接</b>\\n━━━━━━━━━━━━━━\\n\\n当前链接：\\n"+(current?"<code>"+escapeHtml(current)+"</code>":"<i>未设置（将使用机器人内部客服）</i>")+"\\n\\n请发送客服机器人的链接，例如：<code>https://t.me/your_support_bot</code>。\\n发送 <code>0</code> 清除链接并恢复内部客服。\\n发送 <code>/cancel</code> 取消修改。",parse_mode:"HTML",reply_markup:{inline_keyboard:[[{text:"↩️ 取消并返回",callback_data:"admin:settings"}]]}});
+    }
     if(data==="adm:membership_link") {
       states.set("m:"+uid,{step:"membership_purchase_link"});
       const current=membershipPurchaseUrl();
