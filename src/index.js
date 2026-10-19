@@ -7677,7 +7677,7 @@ async function mainMessage(msg) {
       if(uploadTimers.has(timerKey)) { clearTimeout(uploadTimers.get(timerKey)); uploadTimers.delete(timerKey); }
       states.delete(key);
       logAdmin(uid,"取消广播");
-      return send(TOKEN,uid,"❌ <b>已取消广播</b>\\n\\n本次广播未继续发送。",{parse_mode:"HTML"});
+      return send(TOKEN,uid,"❌ <b>已取消广播</b>\\n\\n本次广播未继续发送。",adminMenu());
     }
     let ok=0,fail=0;
     for(const id of db.users){
