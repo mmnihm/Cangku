@@ -7545,36 +7545,20 @@ async function mainMessage(msg) {
 
   // 广播按钮必须优先于上传状态，避免“📢 广播消息”被当成文件夹名称。
   if(t==="📢 广播消息"&&admin) {
+    // 每次点击只开启一次广播；发送一条后会在发送处理分支中自动结束。
     if(uploadTimers.has(key)) { clearTimeout(uploadTimers.get(key)); uploadTimers.delete(key); }
+    if(uploadTimers.has(key+":broadcast")) { clearTimeout(uploadTimers.get(key+":broadcast")); uploadTimers.delete(key+":broadcast"); }
     const sessionId=String(Date.now())+":"+Math.random().toString(36).slice(2);
     states.set(key,{step:"broadcast",sessionId});
-    const timerKey=key+":broadcast";
-    if(uploadTimers.has(timerKey)) clearTimeout(uploadTimers.get(timerKey));
-    uploadTimers.set(timerKey,setTimeout(()=>{
-      uploadTimers.delete(timerKey);
-      const current=states.get(key);
-      if(current?.step==="broadcast" && current.sessionId===sessionId) {
-        states.delete(key);
-        send(TOKEN,uid,"⏸️ <b>广播模式已暂停</b>\\n\\n连续 3 分钟没有收到新内容，已自动退出广播模式。\\n如需继续，请点击「▶️ 继续广播」。",{parse_mode:"HTML",reply_markup:{keyboard:[["▶️ 继续广播","✅ 结束广播"],["🏠 开始"]],resize_keyboard:true}}).catch(()=>{});
-      }
-    },3*60*1000));
-    return send(TOKEN,uid,"📢 <b>广播消息</b>\\n\\n现在请直接发送要广播的文字、图片、视频、音频、文件或其他消息。\\n⏱️ 连续 3 分钟没有收到新的广播内容，将自动退出广播模式。\\n\\n发送 /cancel 可取消。",{parse_mode:"HTML"});
+    return send(TOKEN,uid,"📢 <b>单次广播模式已开启</b>\\n\\n现在发送一条要广播的文字、图片、视频或文件。发送完成后会自动结束广播模式。\\n如需再次广播，请重新点击「📢 广播消息」。",{parse_mode:"HTML"});
   }
 
   if(t==="▶️ 继续广播"&&admin) {
-    const timerKey=key+":broadcast";
-    if(uploadTimers.has(timerKey)) clearTimeout(uploadTimers.get(timerKey));
+    // 兼容旧键盘按钮：不复用会话，直接进入单次广播模式。
+    if(uploadTimers.has(key+":broadcast")) { clearTimeout(uploadTimers.get(key+":broadcast")); uploadTimers.delete(key+":broadcast"); }
     const sessionId=String(Date.now())+":"+Math.random().toString(36).slice(2);
     states.set(key,{step:"broadcast",sessionId});
-    uploadTimers.set(timerKey,setTimeout(()=>{
-      uploadTimers.delete(timerKey);
-      const current=states.get(key);
-      if(current?.step==="broadcast" && current.sessionId===sessionId) {
-        states.delete(key);
-        send(TOKEN,uid,"⏸️ <b>广播模式已暂停</b>\\n\\n连续 3 分钟没有收到新内容，已自动退出广播模式。\\n如需继续，请点击「▶️ 继续广播」。",{parse_mode:"HTML",reply_markup:{keyboard:[["▶️ 继续广播","✅ 结束广播"],["🏠 开始"]],resize_keyboard:true}}).catch(()=>{});
-      }
-    },3*60*1000));
-    return send(TOKEN,uid,"📢 <b>广播消息</b>\\n\\n现在请继续发送要广播的文字、图片、视频、音频、文件或其他消息。\\n⏱️ 连续 3 分钟没有收到新的广播内容，将自动退出广播模式。\\n\\n发送 /cancel 可取消。",{parse_mode:"HTML"});
+    return send(TOKEN,uid,"📢 <b>单次广播模式已开启</b>\\n\\n现在发送一条要广播的内容。发送完成后会自动结束广播模式。",{parse_mode:"HTML"});
   }
 
   if(t==="✅ 结束广播"&&admin) {
