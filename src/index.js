@@ -7653,47 +7653,22 @@ async function mainMessage(msg) {
   }
 
   if(s?.step==="broadcast"&&admin) {
-    const timerKey=key+":broadcast";
-    // 会话标识用于阻止已经结束的旧广播任务重新开启状态。
-    const sessionId=s.sessionId || (String(Date.now())+":"+Math.random().toString(36).slice(2));
-    if(!s.sessionId) states.set(key,{...s,sessionId});
     if(t==="/cancel") {
-      if(uploadTimers.has(timerKey)) { clearTimeout(uploadTimers.get(timerKey)); uploadTimers.delete(timerKey); }
       states.delete(key);
       logAdmin(uid,"取消广播");
-      return send(TOKEN,uid,"❌ <b>已取消广播</b>\\n\\n本次广播未继续发送。",adminMenu());
+      return send(TOKEN,uid,"❌ <b>已取消广播</b>\n\n本次消息没有发送给用户。",adminMenu());
     }
-    let ok=0,fail=0;
-    for(const id of db.users){
-      const current=states.get(key);
-      if(current?.step!=="broadcast" || current.sessionId!==sessionId) break;
-      try {
-        const copied = await tg(TOKEN,"copyMessage",{chat_id:id,from_chat_id:uid,message_id:msg.message_id});
-        if (db.settings.broadcastPin && copied?.message_id) {
-          try {
-            await tg(TOKEN,"pinChatMessage",{
-              chat_id:id,
-              message_id:copied.message_id,
-              disable_notification:true
-            });
-          } catch (pinError) {
-            console.error("BROADCAST PIN:",pinError.message,"user=",id);
-          }
-        }
-        ok++;
-      } catch(e) {
-        fail++;
-        console.error("BROADCAST:",e.message,"user=",id);
-      }
-      await sleep(50);
-    }
-    const current=states.get(key);
-    const stillActive=current?.step==="broadcast" && current.sessionId===sessionId;
-    // 一条消息发送完成后立即结束本次广播，普通消息不再进入广播分支。
-    if(stillActive) states.delete(key);
-    if(uploadTimers.has(timerKey)) { clearTimeout(uploadTimers.get(timerKey)); uploadTimers.delete(timerKey); }
-    console.log("📢 BROADCAST SENT:", "message=",msg.message_id, "success=",ok, "fail=",fail, "users=",db.users.length, "active=false");
-    return send(TOKEN,uid,"📢 <b>本次广播发送完成</b>\\n\\n✅ 成功发送：<b>"+ok+"</b> 人\\n❌ 发送失败：<b>"+fail+"</b> 人\\n👥 用户总数：<b>"+db.users.length+"</b> 人\\n\\n✅ 广播模式已自动结束。普通消息不会被广播。\\n如需再次广播，请重新点击「📢 广播消息」。",{parse_mode:"HTML"});
+    // 先把管理员发来的内容作为草稿，等待确认；此时绝不向用户推送。
+    states.set(key,{step:"broadcast_confirm",messageId:msg.message_id,sessionId:s.sessionId||String(Date.now())});
+    return send(TOKEN,uid,
+      "📝 <b>广播内容已准备好</b>\n━━━━━━━━━━━━━━\n\n"+
+      "请确认是否将这条消息发送给全部用户。\n\n"+
+      "点击「✅ 确认广播」后，机器人会立即退出广播输入状态，在后台静默推送；推送完成后再向你报告成功和失败数量。",
+      {parse_mode:"HTML",reply_markup:{inline_keyboard:[
+        [{text:"✅ 确认广播",callback_data:"broadcast:confirm"}],
+        [{text:"❌ 取消本次广播",callback_data:"broadcast:cancel"}]
+      ]}}
+    );
   }
 
   if((t==="⚙️ 平台设置" || t==="⚙️ 平台管理")&&admin) {
@@ -8318,6 +8293,58 @@ async function handleDirectoryCallback(token, q, child=false) {
   if(data==="adm:repo_bind") return mainMessage({chat:{id:chatId,type:"private"},from:{id:uid},text:"📦 资源仓库"});
 
   if(data==="bind_repo_cancel") { states.delete("m:"+uid); states.delete(uploadStateKey(uid,child,token)); await answer("已取消绑定"); return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>↩️ 已取消绑定资源仓库</b>\n\n当前仓库："+(repo()?.title?"✅ "+escapeHtml(repo().title):"❌ 未绑定"),parse_mode:"HTML",reply_markup:adminResourceInline()}); }
+  if(data==="broadcast:confirm" || data==="broadcast:cancel") {
+    if(!isAdmin(uid) || child) { await answer("无权限",true); return; }
+    const stateKey="m:"+uid;
+    const pending=states.get(stateKey);
+    if(!pending || pending.step!=="broadcast_confirm" || !pending.messageId) {
+      await answer("这次广播已处理或已取消",true);
+      return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>ℹ️ 这次广播已失效</b>\n\n如需广播，请重新点击「📢 广播消息」。",parse_mode:"HTML",reply_markup:{inline_keyboard:[]}});
+    }
+    // 确认或取消都立即清除输入状态，避免后续普通消息被误当作广播。
+    states.delete(stateKey);
+    if(data==="broadcast:cancel") {
+      logAdmin(uid,"取消待确认广播","message="+pending.messageId);
+      await answer("已取消广播");
+      return safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>❌ 已取消本次广播</b>\n\n消息没有发送给用户。",parse_mode:"HTML",reply_markup:{inline_keyboard:[]}});
+    }
+    const sourceMessageId=Number(pending.messageId);
+    const userIds=[...new Set((Array.isArray(db.users)?db.users:[]).map(x=>Number(x)).filter(x=>Number.isFinite(x)&&x>0))];
+    logAdmin(uid,"确认广播","message="+sourceMessageId+" users="+userIds.length);
+    await answer("已确认，正在后台静默推送");
+    await safeEdit(token,{chat_id:chatId,message_id:messageId,text:"<b>🚀 已确认广播</b>\n\n广播输入状态已立即结束，机器人正在后台静默推送。\n完成后会单独发送成功/失败统计。",parse_mode:"HTML",reply_markup:{inline_keyboard:[]}});
+    // 不阻塞轮询；发送完毕后只回报一次统计。disable_notification=true 为静默推送。
+    void (async()=>{
+      let ok=0,fail=0;
+      for(const targetId of userIds) {
+        try {
+          const copied=await tg(token,"copyMessage",{chat_id:targetId,from_chat_id:uid,message_id:sourceMessageId,disable_notification:true});
+          if(db.settings?.broadcastPin && copied?.message_id) {
+            try { await tg(token,"pinChatMessage",{chat_id:targetId,message_id:copied.message_id,disable_notification:true}); }
+            catch(e) { console.warn("BROADCAST PIN:",e.message,"user=",targetId); }
+          }
+          ok++;
+        } catch(e) {
+          fail++;
+          console.error("BROADCAST:",e.message,"user=",targetId);
+        }
+        await sleep(50);
+      }
+      console.log("📢 BACKGROUND BROADCAST DONE:","message=",sourceMessageId,"success=",ok,"fail=",fail,"users=",userIds.length);
+      try {
+        await sendHtml(token,uid,
+          "<b>📢 后台广播发送完成</b>\n━━━━━━━━━━━━━━\n\n"+
+          "✅ 成功发送：<b>"+ok+"</b> 人\n"+
+          "❌ 发送失败：<b>"+fail+"</b> 人\n"+
+          "👥 目标用户：<b>"+userIds.length+"</b> 人\n\n"+
+          "🔕 本次为静默推送。\n"+
+          "如需再次广播，请重新点击「📢 广播消息」。"
+        );
+      } catch(e) { console.error("BROADCAST SUMMARY SEND FAILED:",e.message); }
+    })();
+    return;
+  }
+
   if(data.startsWith("admin:")||data.startsWith("adm:")){void answer();
     if(!isAdmin(uid) || (child && data!=="admin:upload" && data!=="admin:home")){void answer("无权限",true);return;}
     const route=data.slice(data.indexOf(":")+1);
