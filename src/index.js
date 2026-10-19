@@ -7546,33 +7546,35 @@ async function mainMessage(msg) {
   // 广播按钮必须优先于上传状态，避免“📢 广播消息”被当成文件夹名称。
   if(t==="📢 广播消息"&&admin) {
     if(uploadTimers.has(key)) { clearTimeout(uploadTimers.get(key)); uploadTimers.delete(key); }
-    states.set(key,{step:"broadcast"});
+    const sessionId=String(Date.now())+":"+Math.random().toString(36).slice(2);
+    states.set(key,{step:"broadcast",sessionId});
     const timerKey=key+":broadcast";
     if(uploadTimers.has(timerKey)) clearTimeout(uploadTimers.get(timerKey));
     uploadTimers.set(timerKey,setTimeout(()=>{
       uploadTimers.delete(timerKey);
       const current=states.get(key);
-      if(current?.step==="broadcast") {
+      if(current?.step==="broadcast" && current.sessionId===sessionId) {
         states.delete(key);
-        send(TOKEN,uid,"⏸️ <b>暂时没有收到新的广播内容</b>\\n\\n📢 广播模式已等待 3 分钟。\\n\\n还要继续广播吗？",{parse_mode:"HTML",reply_markup:{keyboard:[["▶️ 继续广播","✅ 结束广播"],["🏠 开始"]],resize_keyboard:true}}).catch(()=>{});
+        send(TOKEN,uid,"⏸️ <b>广播模式已暂停</b>\\n\\n连续 3 分钟没有收到新内容，已自动退出广播模式。\\n如需继续，请点击「▶️ 继续广播」。",{parse_mode:"HTML",reply_markup:{keyboard:[["▶️ 继续广播","✅ 结束广播"],["🏠 开始"]],resize_keyboard:true}}).catch(()=>{});
       }
-    },24*60*60*1000));
-    return send(TOKEN,uid,"📢 <b>广播消息</b>\\n\\n现在请直接发送要广播的文字、图片、视频、音频、文件或其他消息。\\n⏱️ 连续 3 分钟没有收到新的广播内容，将自动结束本次广播。\\n\\n发送 /cancel 可取消。",{parse_mode:"HTML"});
+    },3*60*1000));
+    return send(TOKEN,uid,"📢 <b>广播消息</b>\\n\\n现在请直接发送要广播的文字、图片、视频、音频、文件或其他消息。\\n⏱️ 连续 3 分钟没有收到新的广播内容，将自动退出广播模式。\\n\\n发送 /cancel 可取消。",{parse_mode:"HTML"});
   }
 
   if(t==="▶️ 继续广播"&&admin) {
     const timerKey=key+":broadcast";
     if(uploadTimers.has(timerKey)) clearTimeout(uploadTimers.get(timerKey));
-    states.set(key,{step:"broadcast"});
+    const sessionId=String(Date.now())+":"+Math.random().toString(36).slice(2);
+    states.set(key,{step:"broadcast",sessionId});
     uploadTimers.set(timerKey,setTimeout(()=>{
       uploadTimers.delete(timerKey);
       const current=states.get(key);
-      if(current?.step==="broadcast") {
+      if(current?.step==="broadcast" && current.sessionId===sessionId) {
         states.delete(key);
-        send(TOKEN,uid,"⏸️ <b>暂时没有收到新的广播内容</b>\\n\\n📢 广播模式已等待 3 分钟。\\n\\n还要继续广播吗？",{parse_mode:"HTML",reply_markup:{keyboard:[["▶️ 继续广播","✅ 结束广播"],["🏠 开始"]],resize_keyboard:true}}).catch(()=>{});
+        send(TOKEN,uid,"⏸️ <b>广播模式已暂停</b>\\n\\n连续 3 分钟没有收到新内容，已自动退出广播模式。\\n如需继续，请点击「▶️ 继续广播」。",{parse_mode:"HTML",reply_markup:{keyboard:[["▶️ 继续广播","✅ 结束广播"],["🏠 开始"]],resize_keyboard:true}}).catch(()=>{});
       }
-    },24*60*60*1000));
-    return send(TOKEN,uid,"📢 <b>广播消息</b>\\n\\n现在请继续发送要广播的文字、图片、视频、音频、文件或其他消息。\\n⏱️ 连续 3 分钟没有收到新的广播内容，将自动结束本次广播。\\n\\n发送 /cancel 可取消。",{parse_mode:"HTML"});
+    },3*60*1000));
+    return send(TOKEN,uid,"📢 <b>广播消息</b>\\n\\n现在请继续发送要广播的文字、图片、视频、音频、文件或其他消息。\\n⏱️ 连续 3 分钟没有收到新的广播内容，将自动退出广播模式。\\n\\n发送 /cancel 可取消。",{parse_mode:"HTML"});
   }
 
   if(t==="✅ 结束广播"&&admin) {
@@ -7580,7 +7582,7 @@ async function mainMessage(msg) {
     if(uploadTimers.has(timerKey)) { clearTimeout(uploadTimers.get(timerKey)); uploadTimers.delete(timerKey); }
     states.delete(key);
     logAdmin(uid,"结束广播");
-    return send(TOKEN,uid,"✅ 已结束广播。",adminMenu());
+    return send(TOKEN,uid,"✅ 已结束广播。普通消息不会再广播。",adminMenu());
   }
 
   if(t==="📤 上传资源"&&admin) {
@@ -7666,15 +7668,21 @@ async function mainMessage(msg) {
     );
   }
 
-  if(s?.step==="broadcast"&&admin) {    const timerKey=key+":broadcast";
+  if(s?.step==="broadcast"&&admin) {
+    const timerKey=key+":broadcast";
+    // 会话标识用于阻止已经结束的旧广播任务重新开启状态。
+    const sessionId=s.sessionId || (String(Date.now())+":"+Math.random().toString(36).slice(2));
+    if(!s.sessionId) states.set(key,{...s,sessionId});
     if(t==="/cancel") {
       if(uploadTimers.has(timerKey)) { clearTimeout(uploadTimers.get(timerKey)); uploadTimers.delete(timerKey); }
       states.delete(key);
       logAdmin(uid,"取消广播");
-      return send(TOKEN,uid,"❌ <b>已取消广播</b>\\n\\n本次广播未继续发送。",adminMenu());
+      return send(TOKEN,uid,"❌ <b>已取消广播</b>\\n\\n本次广播未继续发送。",{parse_mode:"HTML"});
     }
     let ok=0,fail=0;
     for(const id of db.users){
+      const current=states.get(key);
+      if(current?.step!=="broadcast" || current.sessionId!==sessionId) break;
       try {
         const copied = await tg(TOKEN,"copyMessage",{chat_id:id,from_chat_id:uid,message_id:msg.message_id});
         if (db.settings.broadcastPin && copied?.message_id) {
@@ -7695,18 +7703,25 @@ async function mainMessage(msg) {
       }
       await sleep(50);
     }
-    if(uploadTimers.has(timerKey)) clearTimeout(uploadTimers.get(timerKey));
-    uploadTimers.set(timerKey,setTimeout(()=>{
-      uploadTimers.delete(timerKey);
-      const current=states.get(key);
-      if(current?.step==="broadcast") {
-        states.delete(key);
-        send(TOKEN,uid,"⏸️ <b>暂时没有收到新的广播内容</b>\\n\\n📢 广播模式已等待 3 分钟。\\n\\n还要继续广播吗？",{parse_mode:"HTML",reply_markup:{keyboard:[["▶️ 继续广播","✅ 结束广播"],["🏠 开始"]],resize_keyboard:true}}).catch(()=>{});
-      }
-    },24*60*60*1000));
-    states.set(key,{step:"broadcast"});
-    console.log("📢 BROADCAST SENT:", "message=",msg.message_id, "success=",ok, "fail=",fail, "users=",db.users.length);
-    return send(TOKEN,uid,"📢 <b>广播发送完成</b>\\n\\n✅ 成功发送：<b>"+ok+"</b> 人\\n❌ 发送失败：<b>"+fail+"</b> 人\\n👥 用户总数：<b>"+db.users.length+"</b> 人\\n\\n你可以继续发送下一条广播。\\n⏱️ 连续 3 分钟没有新内容将自动结束。",{parse_mode:"HTML"});
+    const current=states.get(key);
+    const stillActive=current?.step==="broadcast" && current.sessionId===sessionId;
+    if(stillActive) {
+      if(uploadTimers.has(timerKey)) clearTimeout(uploadTimers.get(timerKey));
+      uploadTimers.set(timerKey,setTimeout(()=>{
+        uploadTimers.delete(timerKey);
+        const latest=states.get(key);
+        if(latest?.step==="broadcast" && latest.sessionId===sessionId) {
+          states.delete(key);
+          send(TOKEN,uid,"⏸️ <b>广播模式已暂停</b>\\n\\n连续 3 分钟没有收到新内容，已自动退出广播模式。\\n如需继续，请点击「▶️ 继续广播」。",{parse_mode:"HTML",reply_markup:{keyboard:[["▶️ 继续广播","✅ 结束广播"],["🏠 开始"]],resize_keyboard:true}}).catch(()=>{});
+        }
+      },3*60*1000));
+      states.set(key,{...current,step:"broadcast",sessionId});
+    }
+    console.log("📢 BROADCAST SENT:", "message=",msg.message_id, "success=",ok, "fail=",fail, "users=",db.users.length, "active=",stillActive);
+    const endingText=stillActive
+      ? "\\n\\n你可以继续发送下一条广播。\\n⏱️ 连续 3 分钟没有新内容将自动退出广播模式。"
+      : "\\n\\n🛑 广播模式已结束，普通消息不会再发送给用户。";
+    return send(TOKEN,uid,"📢 <b>广播发送完成</b>\\n\\n✅ 成功发送：<b>"+ok+"</b> 人\\n❌ 发送失败：<b>"+fail+"</b> 人\\n👥 用户总数：<b>"+db.users.length+"</b> 人"+endingText,{parse_mode:"HTML"});
   }
 
   if((t==="⚙️ 平台设置" || t==="⚙️ 平台管理")&&admin) {
