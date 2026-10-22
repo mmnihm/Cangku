@@ -3852,6 +3852,8 @@ async function checkMembershipExpiryReminders() {
   }
   if(changed) saveDb();
 }
+// 成员状态缓存 60 秒，减少高频点击时重复等待 Telegram getChatMember；离群权限最长延迟一个缓存周期。
+const MEMBERSHIP_CACHE_TTL_MS = 60 * 1000;
 const membershipCache = new Map();
 const membershipPending = new Map();
 async function allowed(token, userId) {
@@ -3869,7 +3871,7 @@ async function allowed(token, userId) {
     try {
       const m = await tg(token, "getChatMember", {chat_id:g.chatId, user_id:userId});
       const member=["creator","administrator","member"].includes(m.status) || (m.status === "restricted" && m.is_member === true);
-      membershipCache.set(cacheKey,{member,expiresAt:Date.now()+20000});
+      membershipCache.set(cacheKey,{member,expiresAt:Date.now()+MEMBERSHIP_CACHE_TTL_MS});
       if(membershipCache.size>5000) {
         const now=Date.now();
         for(const [key,value] of membershipCache) if(value.expiresAt<=now) membershipCache.delete(key);
@@ -3916,7 +3918,7 @@ async function refreshRequiredGroupMembership(token,userId) {
     try {
       const m=await tg(token,"getChatMember",{chat_id:g.chatId,user_id:userId});
       const member=["creator","administrator","member"].includes(m.status) || (m.status==="restricted" && m.is_member===true);
-      membershipCache.set(cacheKey,{member,expiresAt:Date.now()+20000});
+      membershipCache.set(cacheKey,{member,expiresAt:Date.now()+MEMBERSHIP_CACHE_TTL_MS});
       if(membershipCache.size>5000) {
         const now=Date.now();
         for(const [key,value] of membershipCache) if(value.expiresAt<=now) membershipCache.delete(key);
@@ -5108,8 +5110,12 @@ function directoryKeyboard() {
   return {reply_markup:{keyboard:rows,resize_keyboard:true,input_field_placeholder:"选择文件夹"}};
 }
 
+const directoryListingCache = new Map();
 function directoryListing(filter="all") {
   const normalized=["videos","albums"].includes(String(filter))?String(filter):"all";
+  // 目录正文与按钮键盘会连续调用此函数；短缓存避免同一次打开目录把全部资源扫描两遍。
+  const now=Date.now(), cached=directoryListingCache.get(normalized);
+  if(cached && cached.expiresAt>now && cached.resourceCount===db.resources.length && cached.directoryCount===db.directories.length) return cached.value;
   const byDirectory=new Map();
   for(const r of db.resources) {
     if(r?.directoryId===undefined || r?.directoryId===null) continue;
@@ -5125,7 +5131,10 @@ function directoryListing(filter="all") {
     if(count>0) counts.set(String(d.id),count);
     return count>0;
   }));
-  return {filter:normalized,counts,activeDirectories};
+  const value={filter:normalized,counts,activeDirectories};
+  directoryListingCache.set(normalized,{value,expiresAt:now+300,resourceCount:db.resources.length,directoryCount:db.directories.length});
+  if(directoryListingCache.size>3) directoryListingCache.delete(directoryListingCache.keys().next().value);
+  return value;
 }
 function directoryInlineKeyboard(page=0,filter="all") {
   const listing=directoryListing(filter);
