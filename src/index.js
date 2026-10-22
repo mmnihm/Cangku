@@ -5351,35 +5351,51 @@ function scheduleAutoDelete(token, chatId, messageIds) {
   db.settings.autoDeleteQueue=db.settings.autoDeleteQueue.slice(-5000);
   saveDb();
 }
+let autoDeleteQueueProcessing = false;
 async function processAutoDeleteQueue() {
-  const q=Array.isArray(db.settings.autoDeleteQueue)?db.settings.autoDeleteQueue:[];
-  if(!q.length) return;
-  const now=Date.now(), keep=[], due=[];
-  for(const item of q) {
-    if(Number(item.deleteAt||0)>now) keep.push(item);
-    else due.push(item);
-  }
-  for(const item of due) {
-    try {
-      const token=decrypt(String(item.token||""));
-      const ids=(Array.isArray(item.messageIds)?item.messageIds:[]).map(Number).filter(Number.isFinite);
-      for(let i=0;i<ids.length;i+=100) {
-        const batch=ids.slice(i,i+100);
-        if(batch.length) await tg(token,"deleteMessages",{chat_id:item.chatId,message_ids:batch});
-      }
-    } catch(e) {
-      const errText=String(e?.message||e);
-      if(/Unauthorized/i.test(errText)) {
-        console.warn("⚠️ 自动删除停止重试：Token 无效或不匹配，旧任务不再循环重试");
-        continue;
-      }
-      console.warn("⚠️ 自动删除失败，5分钟后重试：",errText);
-      item.deleteAt=Date.now()+5*60000;
-      keep.push(item);
+  if(autoDeleteQueueProcessing) return;
+  const current=Array.isArray(db.settings.autoDeleteQueue)?db.settings.autoDeleteQueue:[];
+  if(!current.length) return;
+  autoDeleteQueueProcessing = true;
+  try {
+    // 只处理本轮快照，避免处理过程中新增的任务被误处理或覆盖。
+    const snapshot=current.slice();
+    const now=Date.now(), keep=[], due=[], retry=[];
+    for(const item of snapshot) {
+      if(Number(item.deleteAt||0)>now) keep.push(item);
+      else due.push(item);
     }
+    for(const item of due) {
+      try {
+        const token=decrypt(String(item.token||""));
+        const ids=(Array.isArray(item.messageIds)?item.messageIds:[]).map(Number).filter(Number.isFinite);
+        for(let i=0;i<ids.length;i+=100) {
+          const batch=ids.slice(i,i+100);
+          if(batch.length) await tg(token,"deleteMessages",{chat_id:item.chatId,message_ids:batch});
+        }
+      } catch(e) {
+        const errText=String(e?.message||e);
+        if(/Unauthorized/i.test(errText)) {
+          console.warn("⚠️ 自动删除停止重试：Token 无效或不匹配，旧任务不再循环重试");
+          continue;
+        }
+        if(/user is deactivated|chat not found|bot was blocked by the user|message to delete not found|message can't be deleted|message identifier is not specified/i.test(errText)) {
+          console.warn("⚠️ 自动删除跳过不可恢复任务：",errText);
+          continue;
+        }
+        console.warn("⚠️ 自动删除失败，5分钟后重试：",errText);
+        item.deleteAt=Date.now()+5*60000;
+        retry.push(item);
+      }
+    }
+    // 合并处理期间新加入的任务，不能用旧快照覆盖它们。
+    const latest=Array.isArray(db.settings.autoDeleteQueue)?db.settings.autoDeleteQueue:[];
+    const added=latest.filter(item=>!snapshot.includes(item));
+    db.settings.autoDeleteQueue=keep.concat(retry,added).slice(-5000);
+    if(due.length) saveDb();
+  } finally {
+    autoDeleteQueueProcessing = false;
   }
-  db.settings.autoDeleteQueue=keep.slice(-5000);
-  if(due.length) saveDb();
 }
 function contentProtectionMenu() {
   const on=contentProtectionEnabled();
