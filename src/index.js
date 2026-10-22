@@ -3204,6 +3204,9 @@ const repo = () => db.settings.repository;
 /* CLOUD123_RUNTIME_V1 */
 const cloud123State = new Map();
 let cloud123Syncing = false;
+function cloud123IsPaused() {
+  return db.settings?.cloud123Paused === true;
+}
 
 function cloud123Config() {
   const c = db.settings.cloud123 || {};
@@ -3229,13 +3232,13 @@ function cloud123Client() {
 }
 
 function cloud123Menu() {
-  const c = cloud123Config();
-  const ready = Boolean(c.url && c.username && c.password);
+  const paused = cloud123IsPaused();
   return {
     reply_markup:{
       inline_keyboard:[
         [{text:"🔗 配置123云盘",callback_data:"adm:cloud_setup"},{text:"🧪 测试连接",callback_data:"adm:cloud_test"}],
         [{text:"📁 同步目录+文件",callback_data:"adm:cloud_sync"},{text:"🚀 扫描并上传",callback_data:"adm:cloud_scan"}],
+        [{text:paused?"▶️ 恢复123云盘":"⏸️ 停止123云盘",callback_data:"adm:cloud_toggle"}],
         [{text:"🔄 刷新进度",callback_data:"adm:cloud123"}],
         [{text:"🔁 重试失败文件",callback_data:"adm:cloud_retry"}],
         [{text:"🔐 授权账号",callback_data:"adm:cloud_account"},{text:"⬅️ 返回管理",callback_data:"admin:resource"}]
@@ -3258,7 +3261,7 @@ function cloud123StatusText() {
     "",
     "🔗 WebDAV：" + (c.url ? "✅ 已配置" : "❌ 未配置"),
     "👤 扫描账号：" + ((db.settings.historyAuth||{}).session ? "✅ 已授权" : "❌ 未授权"),
-    "⚙️ 后台：" + (run.running || cloud123Syncing ? "正在上传" : "自动检查中"),
+    "⚙️ 后台：" + (cloud123IsPaused() ? "⏸️ 已停止" : (run.running || cloud123Syncing ? "正在上传" : "自动检查中")),
     "",
     "📚 累计已上传：" + uploaded + " 个",
     "⏳ 剩余待上传：" + remaining + " 个",
@@ -3276,6 +3279,7 @@ function cloud123RemoteName(name) {
 }
 
 async function cloud123SyncDirectories(uid) {
+  if (cloud123IsPaused()) return sendHtml(TOKEN,uid,"⏸️ 123云盘已停止，请先点击「▶️ 恢复123云盘」。",cloud123Menu());
   const client = cloud123Client();
   const dirs = Array.isArray(db.directories) ? db.directories : [];
   const unique = new Map();
@@ -3332,6 +3336,7 @@ async function cloud123SyncDirectories(uid) {
 
 async function cloud123ScanAndUpload(uid, options={}) {
   const silent=options.silent===true;
+  if (cloud123IsPaused()) return silent ? null : sendHtml(TOKEN,uid,"⏸️ 123云盘已停止，请先点击「▶️ 恢复123云盘」。",cloud123Menu());
   if (cloud123Syncing) return silent ? null : send(TOKEN,uid,"⏳ 123云盘同步已经在进行中，请不要重复启动。",adminMenu());
   const r = repo();
   if (!r) return silent ? null : send(TOKEN,uid,"❌ 尚未绑定资源仓库。",adminMenu());
@@ -3565,6 +3570,10 @@ async function cloud123ScanAndUpload(uid, options={}) {
     };
 
     for(let i=0;i<resources.length;) {
+      if (cloud123IsPaused()) {
+        phase="已停止";
+        break;
+      }
       const batch=[];
       let plannedBytes=0;
 
@@ -3640,8 +3649,8 @@ async function cloud123ScanAndUpload(uid, options={}) {
       try { await tg(TOKEN,"editMessageText",{
         chat_id:uid,
         message_id:statusMessage.message_id,
-        text:"✅ <b>123云盘同步完成</b>\n\n"+
-          "📚 本次处理："+resources.length+" 个\n"+
+        text:(cloud123IsPaused()?"⏸️ <b>123云盘已停止</b>":"✅ <b>123云盘同步完成</b>")+"\n\n"+
+          "📚 本次待处理："+resources.length+" 个\n"+
           "✅ 成功："+success+"\n"+
           "⚠️ 失败："+fail+"\n"+
           "⏭️ 跳过："+skip+"\n"+
@@ -8412,6 +8421,16 @@ async function handleDirectoryCallback(token, q, child=false, preAnswered=false)
       db.settings.redeemAdminStates[String(uid)]=redeemState; saveDb();
       return sendHtml(TOKEN,uid,"<b>🎟️ 设置兑换奖励</b>\n\n"+(type==="membership_days"?"请输入每个兑换码奖励的会员天数（1～3650）。":"请输入每个兑换码奖励的额外视频次数（1～100000）。")+"\n发送 /cancel 可取消。",adminMenu());
     }
+    if(data==="adm:cloud_toggle"){
+      const paused = !cloud123IsPaused();
+      db.settings.cloud123Paused = paused;
+      saveDb();
+      await answer(paused ? "123云盘已停止" : "123云盘已恢复");
+      const text = cloud123StatusText() + (paused
+        ? "\n\n⏸️ 已停止新的自动上传；当前正在传输的单个文件结束后会停下。"
+        : "\n\n▶️ 已恢复，后台会继续按每 10 分钟检查一次。");
+      return safeEdit(token,{chat_id:chatId,message_id:messageId,text,parse_mode:"HTML",reply_markup:cloud123Menu().reply_markup});
+    }
     if(data==="adm:cloud_retry"){
       let reset=0;
       for(const item of db.resources){
@@ -9544,6 +9563,7 @@ async function boot(){
     const runCloud123Auto = async () => {
       const adminId = [...ADMIN_IDS][0];
       try {
+        if (cloud123IsPaused()) return;
         if (cloud123Syncing) return;
         if (!adminId) return;
         const cfg = cloud123Config();
