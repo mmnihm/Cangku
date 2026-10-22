@@ -194,6 +194,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const api = (token, method) => `https://api.telegram.org/bot${token}/${method}`;
 // Telegram API 长连接复用：减少每次按钮/消息都重新建立 TLS 连接的耗时。
 const telegramHttpsAgent = new https.Agent({keepAlive:true,maxSockets:50,maxFreeSockets:10,keepAliveMsecs:1000});
+// Callback acknowledgements get their own connection pool so file sends/sync requests cannot queue them behind busy sockets.
+const telegramCallbackHttpsAgent = new https.Agent({keepAlive:true,maxSockets:10,maxFreeSockets:5,keepAliveMsecs:1000});
 async function telegramHttpsRequest(token, method, body, timeoutMs) {
   const payload = JSON.stringify(body || {});
   return await new Promise((resolve, reject) => {
@@ -203,7 +205,7 @@ async function telegramHttpsRequest(token, method, body, timeoutMs) {
         method: "POST",
         family: 4,
         timeout: timeoutMs,
-        agent: telegramHttpsAgent,
+        agent: method === "answerCallbackQuery" ? telegramCallbackHttpsAgent : telegramHttpsAgent,
         headers: {
           "content-type": "application/json",
           "content-length": Buffer.byteLength(payload),
@@ -7849,7 +7851,7 @@ async function childMessage(child,msg,token) {
 }
 const callbackDedupe = new Map();
 
-async function handleDirectoryCallback(token, q, child=false) {
+async function handleDirectoryCallback(token, q, child=false, preAnswered=false) {
   const uid=q.from?.id;
   const data=String(q.data||"");
   const callbackId=q.id;
@@ -7860,7 +7862,7 @@ async function handleDirectoryCallback(token, q, child=false) {
 
   // 回调必须独立于 Google Sheets：先确认点击，再执行按钮逻辑。
   console.log("🔘 CALLBACK:", data, "uid="+uid, "chat="+chatId);
-  let callbackAnswered=false;
+  let callbackAnswered=Boolean(preAnswered);
   const answer=async(text="",showAlert=false)=>{
     if(callbackAnswered) return;
     callbackAnswered=true;
@@ -9406,8 +9408,10 @@ async function pollMain() {
         }
         if(u.callback_query) {
           console.log("🔘 MAIN CALLBACK RECEIVED:", String(u.callback_query.data||""));
-          // 回调后台执行，不阻塞 getUpdates；Telegram 按钮可连续点击，长任务不会卡住整个机器人。
-          void handleDirectoryCallback(TOKEN,u.callback_query,false).catch(async e=>{
+          // 先发出轻量确认请求并使用独立连接池；不等待它，也不让后续菜单/数据库工作延迟启动。
+          void tg(TOKEN,"answerCallbackQuery",{callback_query_id:u.callback_query.id}).catch(e=>console.warn("⚠️ 快速确认按钮失败:",String(e?.message||e)));
+          // 回调后台执行，不阻塞 getUpdates；preAnswered 防止重复确认同一个 query。
+          void handleDirectoryCallback(TOKEN,u.callback_query,false,true).catch(async e=>{
             const message=String(e?.telegramDescription||e?.message||e||"未知错误");
             console.error("MAIN CALLBACK ERROR:",message);
             try { await tg(TOKEN,"answerCallbackQuery",{callback_query_id:u.callback_query.id,text:"操作失败，请查看机器人消息后重试",show_alert:true}); } catch {}
@@ -9428,7 +9432,8 @@ async function pollMain() {
         }
         db.offset=u.update_id+1;
       }
-      saveDb();
+      // 无更新时 offset 和业务数据都没有变化，跳过整库序列化/持久化，避免轮询空转占用事件循环。
+      if(updates.length) saveDb();
     }catch(e){
       // 长轮询/网络异常时不要继续显示“真实连接”，否则心跳会产生假在线状态。
       runtime.mainConnected = false;
@@ -9475,8 +9480,9 @@ async function childLoop(child) {
       for(const u of updates){
         child.offset=u.update_id+1;
         if(u.callback_query) {
-          // 子机器人回调同样后台执行，避免一个慢操作堵住后续按钮。
-          void handleDirectoryCallback(token,u.callback_query,true).catch(async e=>{
+          // 子机器人按钮也优先确认，并使用独立连接池，避免共享 Telegram 请求排队。
+          void tg(token,"answerCallbackQuery",{callback_query_id:u.callback_query.id}).catch(e=>console.warn("⚠️ 子机器人快速确认按钮失败:",String(e?.message||e)));
+          void handleDirectoryCallback(token,u.callback_query,true,true).catch(async e=>{
             const message=String(e?.telegramDescription||e?.message||e||"未知错误");
             console.error("CHILD CALLBACK ERROR:",message);
             try { await tg(token,"answerCallbackQuery",{callback_query_id:u.callback_query.id,text:"操作失败，请重试",show_alert:true}); } catch {}
@@ -9485,7 +9491,7 @@ async function childLoop(child) {
         }
         if(u.message) void childMessage(child,u.message,token).catch(e=>console.error("CHILD MESSAGE:",e.message));
       }
-      saveDb();
+      if(updates.length) saveDb();
     }catch(e){
       console.error("❌ CHILD @" + (child.username || child.botId) + ":",e.message);
       await sleep(3000);
