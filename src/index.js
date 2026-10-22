@@ -9409,7 +9409,9 @@ async function pollMain() {
         if(u.callback_query) {
           console.log("🔘 MAIN CALLBACK RECEIVED:", String(u.callback_query.data||""));
           // 先发出轻量确认请求并使用独立连接池；不等待它，也不让后续菜单/数据库工作延迟启动。
-          void tg(TOKEN,"answerCallbackQuery",{callback_query_id:u.callback_query.id}).catch(e=>console.warn("⚠️ 快速确认按钮失败:",String(e?.message||e)));
+          const callbackUid=Number(u.callback_query.from?.id||0);
+          const callbackBanned=Boolean(db.settings?.redeemAccessBans?.[String(callbackUid)]&&!isAdmin(callbackUid));
+          void tg(TOKEN,"answerCallbackQuery",callbackBanned?{callback_query_id:u.callback_query.id,text:"该账号已被禁止使用机器人",show_alert:true}:{callback_query_id:u.callback_query.id}).catch(e=>console.warn("⚠️ 快速确认按钮失败:",String(e?.message||e)));
           // 回调后台执行，不阻塞 getUpdates；preAnswered 防止重复确认同一个 query。
           void handleDirectoryCallback(TOKEN,u.callback_query,false,true).catch(async e=>{
             const message=String(e?.telegramDescription||e?.message||e||"未知错误");
@@ -9481,7 +9483,9 @@ async function childLoop(child) {
         child.offset=u.update_id+1;
         if(u.callback_query) {
           // 子机器人按钮也优先确认，并使用独立连接池，避免共享 Telegram 请求排队。
-          void tg(token,"answerCallbackQuery",{callback_query_id:u.callback_query.id}).catch(e=>console.warn("⚠️ 子机器人快速确认按钮失败:",String(e?.message||e)));
+          const callbackUid=Number(u.callback_query.from?.id||0);
+          const callbackBanned=Boolean(db.settings?.redeemAccessBans?.[String(callbackUid)]&&!isAdmin(callbackUid));
+          void tg(token,"answerCallbackQuery",callbackBanned?{callback_query_id:u.callback_query.id,text:"该账号已被禁止使用机器人",show_alert:true}:{callback_query_id:u.callback_query.id}).catch(e=>console.warn("⚠️ 子机器人快速确认按钮失败:",String(e?.message||e)));
           void handleDirectoryCallback(token,u.callback_query,true,true).catch(async e=>{
             const message=String(e?.telegramDescription||e?.message||e||"未知错误");
             console.error("CHILD CALLBACK ERROR:",message);
