@@ -1281,16 +1281,10 @@ async function initializeSharedBaserow() {
       if(row?.id) item.baserowRowId=row.id;
     }
 
-    // 单向：只把 JSON 中现有目录和资源写入 Google Sheets；不从表格导入/覆盖 JSON。
-    for(const directory of (Array.isArray(db.directories)?db.directories:[])) {
-      queueBaserowDirectorySync(directory);
-    }
-    for(const item of (Array.isArray(db.resources)?db.resources:[])) {
-      queueBaserowResourceSync(item);
-    }
-    await waitBaserowDirectorySyncQueue();
-    await waitBaserowSyncQueue();
-    console.log("✅ Google Sheets 单向备份初始化完成：JSON 目录="+db.directories.length+"，资源="+db.resources.length);
+    // 启动时只读取并索引已有备份，不把全部目录/资源重新排队写入。
+    // 全量重写会对每条记录执行带延迟的网络写入，资源量大时会长期占用事件循环和网络连接，
+    // 导致 Telegram 按钮确认超时。新目录/新资源仍由原有增量队列写入备份。
+    console.log("✅ Google Sheets 备份连接完成：已索引现有记录；启动时跳过全量重写，JSON 仍为主数据库。");
   } catch(e) {
     baserow.connected=false;
     baserow.lastError=String(e?.message||e);
