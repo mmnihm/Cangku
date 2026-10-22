@@ -155,17 +155,19 @@ async function persistNormalized(db) {
     for(const d of Array.isArray(db.directories)?db.directories:[]) {
       if(!d?.id || !d?.name) continue;
       const id=String(d.id);
-      const fingerprint=JSON.stringify(d);
+      const rowData=JSON.stringify(d);
+      const fingerprint=crypto.createHash("sha1").update(rowData).digest("hex");
       if(persistedFolderFingerprints.get(id)===fingerprint) continue;
-      await conn.execute("INSERT INTO folders (id,name,parent_id,sort_order,status,data,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name),parent_id=VALUES(parent_id),sort_order=VALUES(sort_order),status=VALUES(status),data=VALUES(data),updated_at=VALUES(updated_at)",[id,String(d.name).slice(0,500),d.parentId?String(d.parentId):null,Number(d.sortOrder||0),d.status||"active",fingerprint,Number(d.createdAt||Date.now()),Number(d.updatedAt||Date.now())]);
+      await conn.execute("INSERT INTO folders (id,name,parent_id,sort_order,status,data,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name),parent_id=VALUES(parent_id),sort_order=VALUES(sort_order),status=VALUES(status),data=VALUES(data),updated_at=VALUES(updated_at)",[id,String(d.name).slice(0,500),d.parentId?String(d.parentId):null,Number(d.sortOrder||0),d.status||"active",rowData,Number(d.createdAt||Date.now()),Number(d.updatedAt||Date.now())]);
       folderFingerprintUpdates.push([id,fingerprint]);
     }
     for(const r of Array.isArray(db.resources)?db.resources:[]) {
       const key=resourceKey(r);
       if(!key || key===":" || !r?.chatId || !r?.messageId) continue;
-      const fingerprint=JSON.stringify(r);
+      const rowData=JSON.stringify(r);
+      const fingerprint=crypto.createHash("sha1").update(rowData).digest("hex");
       if(persistedResourceFingerprints.get(key)===fingerprint) continue;
-      await conn.execute("INSERT INTO resources (resource_key,folder_id,chat_id,message_id,title,caption,file_type,file_id,telegram_url,downloads,status,data,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE folder_id=VALUES(folder_id),title=VALUES(title),caption=VALUES(caption),file_type=VALUES(file_type),file_id=VALUES(file_id),telegram_url=VALUES(telegram_url),downloads=VALUES(downloads),status=VALUES(status),data=VALUES(data),updated_at=VALUES(updated_at)",[key,r.directoryId?String(r.directoryId):null,String(r.chatId),Number(r.messageId),String(r.title||"").slice(0,1000),String(r.caption||""),String(r.fileType||""),String(r.fileId||""),telegramUrl(r),Number(r.downloads||0),r.status||"active",fingerprint,Number(r.date||r.createdAt||Date.now()),Date.now()]);
+      await conn.execute("INSERT INTO resources (resource_key,folder_id,chat_id,message_id,title,caption,file_type,file_id,telegram_url,downloads,status,data,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE folder_id=VALUES(folder_id),title=VALUES(title),caption=VALUES(caption),file_type=VALUES(file_type),file_id=VALUES(file_id),telegram_url=VALUES(telegram_url),downloads=VALUES(downloads),status=VALUES(status),data=VALUES(data),updated_at=VALUES(updated_at)",[key,r.directoryId?String(r.directoryId):null,String(r.chatId),Number(r.messageId),String(r.title||"").slice(0,1000),String(r.caption||""),String(r.fileType||""),String(r.fileId||""),telegramUrl(r),Number(r.downloads||0),r.status||"active",rowData,Number(r.date||r.createdAt||Date.now()),Date.now()]);
       resourceFingerprintUpdates.push([key,fingerprint]);
     }
     const repos=[];
@@ -313,15 +315,16 @@ export function isMySQLReady() {
 
 export function persistMySQL(db) {
   if(!ready || !pool) return;
-  // 批量迁移/上传期间 saveDb() 可能高频触发；只保留最新快照，
-  // 避免把数百次完整数据库写入全部排进 MySQL 队列。
-  pendingSnapshot=JSON.parse(JSON.stringify(db));
+  // During an active write, keep only a reference to the latest live state.
+  // Clone once when the worker is ready to process it, not on every saveDb call.
+  pendingSnapshot=db;
   if(writeRunning) return;
   writeRunning=true;
   writeQueue=writeQueue.then(async()=>{
     while(pendingSnapshot){
-      const snapshot=pendingSnapshot;
+      const source=pendingSnapshot;
       pendingSnapshot=null;
+      const snapshot=JSON.parse(JSON.stringify(source));
       try{
         await persistNormalized(snapshot);
       }catch(e){
