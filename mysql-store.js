@@ -7,6 +7,10 @@ let writeQueue = Promise.resolve();
 let pendingSnapshot = null;
 let writeRunning = false;
 const processedDeletionKeys = new Set();
+// Keep fingerprints of rows successfully persisted in this process so ordinary
+// state saves do not UPSERT every resource and folder again.
+const persistedFolderFingerprints = new Map();
+const persistedResourceFingerprints = new Map();
 
 function envBool(v, fallback=false) {
   const s=String(v ?? "").trim().toLowerCase();
@@ -143,17 +147,26 @@ function telegramUrl(item) {
 
 async function persistNormalized(db) {
   const conn=await pool.getConnection();
+  const folderFingerprintUpdates=[];
+  const resourceFingerprintUpdates=[];
   try {
     await conn.beginTransaction();
     await conn.execute("INSERT INTO bot_state (state_key,data) VALUES (?,?) ON DUPLICATE KEY UPDATE data=VALUES(data)",[stateKey(),JSON.stringify(db)]);
     for(const d of Array.isArray(db.directories)?db.directories:[]) {
       if(!d?.id || !d?.name) continue;
-      await conn.execute("INSERT INTO folders (id,name,parent_id,sort_order,status,data,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name),parent_id=VALUES(parent_id),sort_order=VALUES(sort_order),status=VALUES(status),data=VALUES(data),updated_at=VALUES(updated_at)",[String(d.id),String(d.name).slice(0,500),d.parentId?String(d.parentId):null,Number(d.sortOrder||0),d.status||"active",JSON.stringify(d),Number(d.createdAt||Date.now()),Number(d.updatedAt||Date.now())]);
+      const id=String(d.id);
+      const fingerprint=JSON.stringify(d);
+      if(persistedFolderFingerprints.get(id)===fingerprint) continue;
+      await conn.execute("INSERT INTO folders (id,name,parent_id,sort_order,status,data,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name),parent_id=VALUES(parent_id),sort_order=VALUES(sort_order),status=VALUES(status),data=VALUES(data),updated_at=VALUES(updated_at)",[id,String(d.name).slice(0,500),d.parentId?String(d.parentId):null,Number(d.sortOrder||0),d.status||"active",fingerprint,Number(d.createdAt||Date.now()),Number(d.updatedAt||Date.now())]);
+      folderFingerprintUpdates.push([id,fingerprint]);
     }
     for(const r of Array.isArray(db.resources)?db.resources:[]) {
       const key=resourceKey(r);
       if(!key || key===":" || !r?.chatId || !r?.messageId) continue;
-      await conn.execute("INSERT INTO resources (resource_key,folder_id,chat_id,message_id,title,caption,file_type,file_id,telegram_url,downloads,status,data,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE folder_id=VALUES(folder_id),title=VALUES(title),caption=VALUES(caption),file_type=VALUES(file_type),file_id=VALUES(file_id),telegram_url=VALUES(telegram_url),downloads=VALUES(downloads),status=VALUES(status),data=VALUES(data),updated_at=VALUES(updated_at)",[key,r.directoryId?String(r.directoryId):null,String(r.chatId),Number(r.messageId),String(r.title||"").slice(0,1000),String(r.caption||""),String(r.fileType||""),String(r.fileId||""),telegramUrl(r),Number(r.downloads||0),r.status||"active",JSON.stringify(r),Number(r.date||r.createdAt||Date.now()),Date.now()]);
+      const fingerprint=JSON.stringify(r);
+      if(persistedResourceFingerprints.get(key)===fingerprint) continue;
+      await conn.execute("INSERT INTO resources (resource_key,folder_id,chat_id,message_id,title,caption,file_type,file_id,telegram_url,downloads,status,data,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE folder_id=VALUES(folder_id),title=VALUES(title),caption=VALUES(caption),file_type=VALUES(file_type),file_id=VALUES(file_id),telegram_url=VALUES(telegram_url),downloads=VALUES(downloads),status=VALUES(status),data=VALUES(data),updated_at=VALUES(updated_at)",[key,r.directoryId?String(r.directoryId):null,String(r.chatId),Number(r.messageId),String(r.title||"").slice(0,1000),String(r.caption||""),String(r.fileType||""),String(r.fileId||""),telegramUrl(r),Number(r.downloads||0),r.status||"active",fingerprint,Number(r.date||r.createdAt||Date.now()),Date.now()]);
+      resourceFingerprintUpdates.push([key,fingerprint]);
     }
     const repos=[];
     if(db.settings?.repository) repos.push(db.settings.repository);
@@ -176,6 +189,8 @@ async function persistNormalized(db) {
       await conn.execute("INSERT INTO sync_tasks (task_key,source_chat_id,target_chat_id,status,last_message_id,queued,copied,skipped,failed,last_error,data,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?, ?,?) ON DUPLICATE KEY UPDATE source_chat_id=VALUES(source_chat_id),target_chat_id=VALUES(target_chat_id),status=VALUES(status),last_message_id=VALUES(last_message_id),queued=VALUES(queued),copied=VALUES(copied),skipped=VALUES(skipped),failed=VALUES(failed),last_error=VALUES(last_error),data=VALUES(data),updated_at=VALUES(updated_at)",[taskKey,String(task.sourceId||""),String(task.targetId||""),String(task.status||"idle"),Number(task.lastMessageId||0),Number(task.queue?.length||0),Number(task.copied||0),Number(task.skipped||0),Number(task.failed||0),String(task.lastError||""),JSON.stringify(task),Date.now(),Date.now()]);
     }
     await conn.commit();
+    for(const [id,fingerprint] of folderFingerprintUpdates) persistedFolderFingerprints.set(id,fingerprint);
+    for(const [key,fingerprint] of resourceFingerprintUpdates) persistedResourceFingerprints.set(key,fingerprint);
     for(const key of pendingDeletedKeys) processedDeletionKeys.add(key);
   } catch(e) { try { await conn.rollback(); } catch {} throw e; } finally { conn.release(); }
 }
