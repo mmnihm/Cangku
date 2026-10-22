@@ -4543,11 +4543,22 @@ function queueResourceFolderTag(item){
 async function processResourceFolderTagQueue(){
   try{
     let processed=0;
+    // 每批最多扫描一次资源表，避免队列中每条记录都从头查找。
+    const resourceByKey=new Map();
+    for(const item of db.resources) {
+      const chatId=String(item?.chatId||"").trim();
+      const messageId=String(item?.messageId||"").trim();
+      if(chatId && messageId) resourceByKey.set(chatId+":"+messageId,item);
+    }
     while(resourceTagQueue.size && processed<50){
       const key=resourceTagQueue.values().next().value;
       resourceTagQueue.delete(key);
-      const parts=String(key).split(":");
-      const item=db.resources.find(x=>String(x.chatId)===String(parts[0])&&String(x.messageId)===String(parts[1]));
+      // 新资源可能在批次开始后加入；未命中时回退到实时查找，避免丢掉新入队项目。
+      let item=resourceByKey.get(key);
+      if(!item) {
+        const parts=String(key).split(":");
+        item=db.resources.find(x=>String(x.chatId)===String(parts[0])&&String(x.messageId)===String(parts[1]));
+      }
       if(item){
         try{ syncResourceFolderTag(item); queueBaserowResourceSync(item); }
         catch(e){ console.warn("⚠️ 后台文件夹标签处理失败:",String(e?.message||e)); }
@@ -5044,9 +5055,15 @@ async function finalizeUpload(uid, state, token=TOKEN, stateKey=uploadStateKey(u
 }
 
 function directoryKeyboard() {
+  const counts=new Map();
+  for(const r of db.resources) {
+    if(r?.directoryId===undefined || r?.directoryId===null) continue;
+    const key=String(r.directoryId);
+    counts.set(key,(counts.get(key)||0)+1);
+  }
   const rows=[];
-  for(const d of db.directories){
-    const count=db.resources.filter(r=>String(r.directoryId)===String(d.id)).length;
+  for(const d of db.directories) {
+    const count=counts.get(String(d.id))||0;
     if(count) rows.push(["📁 "+d.name+"（"+count+"）"]);
   }
   if(!rows.length) rows.push(["📭 暂无分类"]);
