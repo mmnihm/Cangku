@@ -3890,6 +3890,10 @@ async function allowed(token, userId) {
 // 统一读取指定群会员缓存。null 表示尚未检查或缓存过期，避免把“未知”当成非会员。
 function cachedRequiredGroupMembership(userId) {
   if(isAdmin(userId) || hasActivePremiumMembership(userId)) return true;
+  return cachedActualRequiredGroupMembership(userId);
+}
+// 只返回 Telegram 指定群的实际成员结果，不把兑换会员或管理员混算为黄金会员。
+function cachedActualRequiredGroupMembership(userId) {
   const g=group();
   if(!g?.chatId) return false;
   const key=tokenFingerprint(TOKEN)+":"+String(g.chatId)+":"+String(userId);
@@ -3899,6 +3903,35 @@ function cachedRequiredGroupMembership(userId) {
     return null;
   }
   return cached.member===true;
+}
+async function refreshRequiredGroupMembership(token,userId) {
+  const g=group();
+  if(!g?.chatId) return false;
+  const cacheKey=tokenFingerprint(token)+":"+String(g.chatId)+":"+String(userId);
+  const cached=membershipCache.get(cacheKey);
+  if(cached && cached.expiresAt>Date.now()) return cached.member===true;
+  if(cached) membershipCache.delete(cacheKey);
+  if(membershipPending.has(cacheKey)) return membershipPending.get(cacheKey);
+  const pending=(async()=>{
+    try {
+      const m=await tg(token,"getChatMember",{chat_id:g.chatId,user_id:userId});
+      const member=["creator","administrator","member"].includes(m.status) || (m.status==="restricted" && m.is_member===true);
+      membershipCache.set(cacheKey,{member,expiresAt:Date.now()+20000});
+      if(membershipCache.size>5000) {
+        const now=Date.now();
+        for(const [key,value] of membershipCache) if(value.expiresAt<=now) membershipCache.delete(key);
+        while(membershipCache.size>5000) membershipCache.delete(membershipCache.keys().next().value);
+      }
+      return member;
+    } catch(e) {
+      console.warn("⚠️ 黄金会员群身份确认失败:",String(e?.telegramDescription||e?.message||e));
+      return false;
+    } finally {
+      membershipPending.delete(cacheKey);
+    }
+  })();
+  membershipPending.set(cacheKey,pending);
+  return pending;
 }
 async function requireMemberAccess(token, chatId, userId, menu=null) {
   // 指定群只负责会员身份与非会员额度判断；是否强制入群由额度设置决定。
@@ -4221,10 +4254,12 @@ function childMenu() {
   return userHomeReplyKeyboard();
 }
 function userHomeText(uid) {
-  const groupMember = cachedRequiredGroupMembership(uid)===true;
-  const premium = isAdmin(uid) || hasActivePremiumMembership(uid) || groupMember;
+  const groupMember = cachedActualRequiredGroupMembership(uid)===true;
+  const redeemedMember = hasActivePremiumMembership(uid);
+  const premium = isAdmin(uid) || redeemedMember || groupMember;
   const remaining = nonMemberDailyRemaining(uid);
-  const quota = premium ? "💎 <b>会员状态：</b>不限量获取" : "🎁 <b>今日免费额度：</b>剩余 " + Math.max(0, Number(remaining) || 0) + " 个";
+  const level = isAdmin(uid) ? "管理员" : groupMember ? "黄金会员" : redeemedMember ? "普通会员" : "";
+  const quota = premium ? "💎 <b>会员等级：</b>" + level + " · 不限量获取" : "🎁 <b>今日免费额度：</b>剩余 " + Math.max(0, Number(remaining) || 0) + " 个";
   const knownFolderIds = new Set(db.directories.map(d => String(d.id)));
   const folderCount = new Set(db.resources.filter(r => r && r.directoryId !== undefined && r.directoryId !== null && knownFolderIds.has(String(r.directoryId))).map(r => String(r.directoryId))).size;
   return "<b>🏠 资源平台</b>\n━━━━━━━━━━━━━━\n\n" +
@@ -4235,14 +4270,16 @@ function userHomeText(uid) {
     "👇 <i>请选择下方四个固定按钮</i>";
 }
 function userProfileText(uid) {
-  const groupMember = cachedRequiredGroupMembership(uid)===true;
-  const premium = isAdmin(uid) || hasActivePremiumMembership(uid) || groupMember;
+  const groupMember = cachedActualRequiredGroupMembership(uid)===true;
+  const redeemedMember = hasActivePremiumMembership(uid);
+  const premium = isAdmin(uid) || redeemedMember || groupMember;
+  const level = isAdmin(uid) ? "管理员" : groupMember ? "黄金会员（指定群）" : redeemedMember ? "普通会员" : "";
   const remaining = Math.max(0, Number(nonMemberDailyRemaining(uid)) || 0);
   const limit = Math.max(0, Number(nonMemberDailyLimit()) || 0);
   return "<b>👤 个人中心</b>\n━━━━━━━━━━━━━━\n\n" +
     "🆔 用户 ID：<code>" + escapeHtml(String(uid)) + "</code>\n" +
     (premium
-      ? "💎 会员权益：<b>已生效</b>\n🎁 今日获取额度：<b>不限量</b>\n"
+      ? "💎 会员等级：<b>" + level + "</b>\n🎁 今日获取额度：<b>不限量</b>\n"
       : "💳 会员状态：<b>普通用户</b>\n🎁 今日免费额度：<b>" + remaining + " / " + limit + "</b> 个\n") +
     "\n📌 可在此使用兑换码、查看最新资源或联系在线客服。";
 }
@@ -6585,6 +6622,7 @@ async function mainMessage(msg) {
 
   if(String(t||"").replace(/[\uFE0E\uFE0F]/g,"").replace(/\s+/g,"").trim()==="👤个人中心" && !admin) {
     states.delete(key);
+    await refreshRequiredGroupMembership(TOKEN,uid);
     return sendHtml(TOKEN,uid,userProfileText(uid),{reply_markup:userProfileInlineKeyboard()});
   }
 
@@ -6931,6 +6969,7 @@ async function mainMessage(msg) {
 👇 <i>点击下方按钮开始使用</i>`,admin?adminMenu():userMenu());
       return;
     }
+    if(!admin) await refreshRequiredGroupMembership(TOKEN,uid);
     return sendHtml(TOKEN,uid,admin?adminStatusText():userHomeText(uid),admin?adminMenu():userMenu());
   }
   if(t==="/admin") {
@@ -7858,6 +7897,7 @@ async function childMessage(child,msg,token) {
   }
   if(String(t||"").replace(/[\uFE0E\uFE0F]/g,"").replace(/\s+/g,"").trim()==="👤个人中心") {
     states.delete(key);
+    await refreshRequiredGroupMembership(TOKEN,uid);
     return sendHtml(token,uid,userProfileText(uid),{reply_markup:userProfileInlineKeyboard()});
   }
   if(t==="🔎 搜索资源"){
@@ -8055,6 +8095,7 @@ async function handleDirectoryCallback(token, q, child=false, preAnswered=false)
     }
     if(action==="profile") {
       await answer("正在打开个人中心");
+      await refreshRequiredGroupMembership(TOKEN,uid);
       const profileText=userProfileText(uid);
       const edited=await safeEdit(token,{
         chat_id:chatId,
@@ -8117,6 +8158,7 @@ async function handleDirectoryCallback(token, q, child=false, preAnswered=false)
         });
       }
       await safeEdit(token,{chat_id:chatId,message_id:messageId,reply_markup:{inline_keyboard:[]}}).catch(()=>{});
+      await refreshRequiredGroupMembership(TOKEN,uid);
       return sendHtml(token,uid,userHomeText(uid),child?childMenu():userMenu());
     }
     if(action==="clone") {
@@ -8920,6 +8962,7 @@ async function handleDirectoryCallback(token, q, child=false, preAnswered=false)
   if(data==="batch:random" || data==="batch:video" || data.startsWith("batch:latest:") || data==="batch:home"){
     if(data==="batch:home"){
       void answer("返回首页");
+      await refreshRequiredGroupMembership(TOKEN,uid);
       return sendHtml(token,uid,userHomeText(uid),child ? childMenu() : userMenu());
     }
     // 再来一组/下一批前清除旧控制键盘，新按钮只挂在新一组文件之后。
