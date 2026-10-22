@@ -195,7 +195,8 @@ const api = (token, method) => `https://api.telegram.org/bot${token}/${method}`;
 // Telegram API 长连接复用：减少每次按钮/消息都重新建立 TLS 连接的耗时。
 const telegramHttpsAgent = new https.Agent({keepAlive:true,maxSockets:50,maxFreeSockets:10,keepAliveMsecs:1000});
 // Callback acknowledgements get their own connection pool so file sends/sync requests cannot queue them behind busy sockets.
-const telegramCallbackHttpsAgent = new https.Agent({keepAlive:true,maxSockets:10,maxFreeSockets:5,keepAliveMsecs:1000});
+// Callback acknowledgements use fresh sockets to avoid stale idle keep-alive connections delaying button feedback.
+const telegramCallbackHttpsAgent = new https.Agent({keepAlive:false,maxSockets:10});
 async function telegramHttpsRequest(token, method, body, timeoutMs) {
   const payload = JSON.stringify(body || {});
   return await new Promise((resolve, reject) => {
