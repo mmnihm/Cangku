@@ -276,9 +276,11 @@ async function tg(token, method, body = {}) {
   const maxAttempts = method === "getUpdates" ? 8 : (isCallbackAck ? 1 : 4);
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const timeoutMs = method === "getUpdates" ? 50000 : (isCallbackAck ? 5000 : 20000);
+    const callbackRequestStartedAt = isCallbackAck ? Date.now() : 0;
     try {
       const r = await telegramHttpsRequest(token, method, body, timeoutMs);
       const j = r.json;
+      if (isCallbackAck) console.log("⏱️ CALLBACK ACK HTTP:", "ms=" + (Date.now() - callbackRequestStartedAt), "status=" + r.status, "ok=" + Boolean(j.ok));
       if (j.ok) return j.result;
 
       if (method === "getUpdates" && /409|Conflict|terminated by other getUpdates request/i.test(String(j.description || ""))) {
@@ -322,6 +324,7 @@ async function tg(token, method, body = {}) {
       if (e?.noRetry) {
         throw e;
       }
+      if (isCallbackAck) console.warn("⏱️ CALLBACK ACK FAILED:", "ms=" + (Date.now() - callbackRequestStartedAt), "code=" + (code || "-"), msg);
       console.warn("⚠️ Telegram HTTPS 请求失败:", method, "attempt="+(attempt+1)+"/"+maxAttempts, code ? code+" | " : "", msg);
       if (attempt >= maxAttempts - 1) {
         throw new Error(method + " 网络请求失败: " + (code ? code+" | " : "") + msg);
