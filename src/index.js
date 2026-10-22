@@ -200,13 +200,17 @@ const telegramCallbackHttpsAgent = new https.Agent({keepAlive:false,maxSockets:1
 async function telegramHttpsRequest(token, method, body, timeoutMs) {
   const payload = JSON.stringify(body || {});
   return await new Promise((resolve, reject) => {
+    const isCallbackAck = method === "answerCallbackQuery";
+    const startedAt = Date.now();
+    const phases = {socket: null, lookup: null, connect: null, tls: null, response: null, end: null};
+    const elapsed = at => at == null ? "-" : String(at - startedAt);
     const req = https.request(
       api(token, method),
       {
         method: "POST",
         family: 4,
         timeout: timeoutMs,
-        agent: method === "answerCallbackQuery" ? telegramCallbackHttpsAgent : telegramHttpsAgent,
+        agent: isCallbackAck ? telegramCallbackHttpsAgent : telegramHttpsAgent,
         headers: {
           "content-type": "application/json",
           "content-length": Buffer.byteLength(payload),
@@ -214,10 +218,15 @@ async function telegramHttpsRequest(token, method, body, timeoutMs) {
         }
       },
       res => {
+        if (isCallbackAck) phases.response = Date.now();
         let data = "";
         res.setEncoding("utf8");
         res.on("data", chunk => { data += chunk; });
         res.on("end", () => {
+          if (isCallbackAck) {
+            phases.end = Date.now();
+            console.log("🔬 CALLBACK ACK PHASES:", "socket=" + elapsed(phases.socket) + "ms", "dns=" + elapsed(phases.lookup) + "ms", "tcp=" + elapsed(phases.connect) + "ms", "tls=" + elapsed(phases.tls) + "ms", "response=" + elapsed(phases.response) + "ms", "end=" + elapsed(phases.end) + "ms");
+          }
           try {
             resolve({status: res.statusCode || 0, json: JSON.parse(data || "{}")});
           } catch (e) {
@@ -226,8 +235,26 @@ async function telegramHttpsRequest(token, method, body, timeoutMs) {
         });
       }
     );
+    if (isCallbackAck) {
+      req.on("socket", socket => {
+        phases.socket = Date.now();
+        if (socket.connecting) {
+          socket.once("lookup", () => { phases.lookup = Date.now(); });
+          socket.once("connect", () => { phases.connect = Date.now(); });
+          socket.once("secureConnect", () => { phases.tls = Date.now(); });
+        } else {
+          phases.connect = phases.tls = Date.now();
+        }
+      });
+    }
     req.on("timeout", () => req.destroy(new Error("ETIMEDOUT")));
-    req.on("error", reject);
+    req.on("error", e => {
+      if (isCallbackAck) {
+        phases.end = Date.now();
+        console.warn("🔬 CALLBACK ACK PHASES FAILED:", "socket=" + elapsed(phases.socket) + "ms", "dns=" + elapsed(phases.lookup) + "ms", "tcp=" + elapsed(phases.connect) + "ms", "tls=" + elapsed(phases.tls) + "ms", "total=" + elapsed(phases.end) + "ms", "error=" + String(e?.code || e?.message || e));
+      }
+      reject(e);
+    });
     req.write(payload);
     req.end();
   });
