@@ -3205,7 +3205,8 @@ const repo = () => db.settings.repository;
 const cloud123State = new Map();
 let cloud123Syncing = false;
 function cloud123IsPaused() {
-  return db.settings?.cloud123Paused === true;
+  // 默认暂停123云盘任务，避免启动后大量失败上传拖慢机器人；管理员可在按钮中手动恢复。
+  return db.settings?.cloud123Paused !== false;
 }
 
 function cloud123Config() {
