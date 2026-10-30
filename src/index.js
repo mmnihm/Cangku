@@ -6602,7 +6602,7 @@ async function mainMessage(msg) {
   const t=msg.text||"";
   const rawText=String(msg.text||"").trim();
   const admin=isAdmin(uid);
-  if(admin && /^\/exportdirectories(?:@\\w+)?$/i.test(rawText)) {
+  if(admin && /^\/exportdirectories(?:@\w+)?$/i.test(rawText)) {
     const directoryCount=(db.directories||[]).length;
     const resourceCount=(db.resources||[]).filter(r=>r?.fileType && !r?.textOnly && r?.chatId && Number(r?.messageId)>0).length;
     await sendHtml(TOKEN,uid,"⏳ 正在整理目录和资源清单…\n📁 目录："+directoryCount+"\n📦 可迁移文件："+resourceCount);
