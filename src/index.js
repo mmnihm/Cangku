@@ -260,6 +260,42 @@ async function telegramHttpsRequest(token, method, body, timeoutMs) {
   });
 }
 
+async function sendJsonDocument(token, chatId, filename, data) {
+  const boundary = "----CangkuExport" + crypto.randomBytes(12).toString("hex");
+  const file = Buffer.from(JSON.stringify(data), "utf8");
+  const fields = [
+    ["chat_id", String(chatId)],
+    ["caption", "📦 Cangku 目录迁移数据\n请将此 JSON 文件发送给会员网盘机器人。"]
+  ];
+  const chunks = [];
+  for (const [name, value] of fields) {
+    chunks.push(Buffer.from("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + value + "\r\n"));
+  }
+  chunks.push(Buffer.from("--" + boundary + "\r\nContent-Disposition: form-data; name=\"document\"; filename=\"" + filename + "\"\r\nContent-Type: application/json\r\n\r\n"));
+  chunks.push(file, Buffer.from("\r\n--" + boundary + "--\r\n"));
+  const payload = Buffer.concat(chunks);
+  return await new Promise((resolve, reject) => {
+    const req = https.request(api(token, "sendDocument"), {
+      method: "POST", timeout: 60000,
+      headers: {"content-type":"multipart/form-data; boundary=" + boundary, "content-length":payload.length}
+    }, res => {
+      let raw = "";
+      res.setEncoding("utf8");
+      res.on("data", chunk => { raw += chunk; });
+      res.on("end", () => {
+        try {
+          const result = JSON.parse(raw || "{}");
+          if (!result.ok) return reject(new Error(result.description || "sendDocument failed"));
+          resolve(result.result);
+        } catch (error) { reject(error); }
+      });
+    });
+    req.on("timeout", () => req.destroy(new Error("sendDocument timeout")));
+    req.on("error", reject);
+    req.end(payload);
+  });
+}
+
 async function safeEdit(token, body, fallbackText = "") {
   try {
     const formattedBody = body && typeof body === "object" && typeof body.text === "string"
@@ -6518,6 +6554,40 @@ async function backupRecoveryMerge(uid) {
     adminMenu());
 }
 
+async function exportCangkuDirectories(uid) {
+  const directories = (Array.isArray(db.directories) ? db.directories : []).map(d => ({
+    id: String(d?.id ?? ""), name: String(d?.name ?? "").trim(),
+    description: String(d?.description ?? ""), createdAt: d?.createdAt ?? null
+  })).filter(d => d.name);
+  const resources = (Array.isArray(db.resources) ? db.resources : []).filter(r =>
+    r && r.chatId && Number(r.messageId) > 0 && r.fileType && !r.textOnly
+  ).map(r => {
+    const directory = directories.find(d => String(d.id) === String(r.directoryId));
+    return {
+      chatId: String(r.chatId), messageId: Number(r.messageId),
+      title: String(r.title || "未命名资源").slice(0, 200),
+      caption: String(r.caption || "").slice(0, 900),
+      date: Number(r.date || 0), fileType: String(r.fileType),
+      directoryId: r.directoryId == null ? null : String(r.directoryId),
+      category: directory?.name || "未分类"
+    };
+  });
+  const payload = {
+    format: "cangku-directory-export", version: 1,
+    exportedAt: new Date().toISOString(),
+    directoryCount: directories.length, resourceCount: resources.length,
+    directories, resources
+  };
+  try {
+    const sent = await sendJsonDocument(TOKEN, uid, "cangku-directories-export.json", payload);
+    logAdmin(uid, "导出目录迁移数据", "目录 " + directories.length + "，资源 " + resources.length);
+    return sent;
+  } catch (error) {
+    console.error("CANGKU DIRECTORY EXPORT:", String(error?.message || error));
+    return sendHtml(TOKEN, uid, "❌ <b>导出失败</b>\n\n" + escapeHtml(String(error?.message || error)).slice(0, 500), adminMenu());
+  }
+}
+
 async function mainMessage(msg) {
   // 客服回复必须先于绑定、上传、兑换码等状态机处理，避免管理员回复被其他流程截走。
   if(msg.chat?.type==="private" && isAdmin(msg.from?.id) && await supportHandleAdminReply(TOKEN,msg)) return;
@@ -6532,6 +6602,12 @@ async function mainMessage(msg) {
   const t=msg.text||"";
   const rawText=String(msg.text||"").trim();
   const admin=isAdmin(uid);
+  if(admin && /^\/exportdirectories(?:@\\w+)?$/i.test(rawText)) {
+    const directoryCount=(db.directories||[]).length;
+    const resourceCount=(db.resources||[]).filter(r=>r?.fileType && !r?.textOnly && r?.chatId && Number(r?.messageId)>0).length;
+    await sendHtml(TOKEN,uid,"⏳ 正在整理目录和资源清单…\n📁 目录："+directoryCount+"\n📦 可迁移文件："+resourceCount);
+    return exportCangkuDirectories(uid);
+  }
   if(!admin && db.settings?.redeemAccessBans?.[String(uid)]) return sendHtml(TOKEN,uid,"⛔ <b>此账号已被禁止使用机器人。</b>\n如有疑问，请联系管理员。");
   if (!admin) await ensureUserInlineMode(TOKEN, uid);
   const key="m:"+uid;
