@@ -276,7 +276,7 @@ async function sendJsonDocument(token, chatId, filename, data) {
   const payload = Buffer.concat(chunks);
   return await new Promise((resolve, reject) => {
     const req = https.request(api(token, "sendDocument"), {
-      method: "POST", timeout: 60000,
+      method: "POST", timeout: 600000,
       headers: {"content-type":"multipart/form-data; boundary=" + boundary, "content-length":payload.length}
     }, res => {
       let raw = "";
