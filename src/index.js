@@ -1691,7 +1691,9 @@ function touchSharedData(uid="system") {
   if(!db.settings.sharedData || typeof db.settings.sharedData!=="object") db.settings.sharedData={version:1,lastChangedAt:Date.now(),lastChangedBy:String(uid)};
   db.settings.sharedData.version=Number(db.settings.sharedData.version||0)+1;
   db.settings.sharedData.lastChangedAt=Date.now();
-  db.settings.sharedData.lastChangedBy=String(uid||"system");}
+  db.settings.sharedData.lastChangedBy=String(uid||"system");
+  invalidateDirectoryListingCache();
+}
 
 let historyClient = null;
 let historyConnecting = null;
@@ -5178,11 +5180,14 @@ function directoryKeyboard() {
 }
 
 const directoryListingCache = new Map();
+function invalidateDirectoryListingCache() {
+  directoryListingCache.clear();
+}
 function directoryListing(filter="all") {
   const normalized=["videos","albums"].includes(String(filter))?String(filter):"all";
-  // 目录正文与按钮键盘会连续调用此函数；短缓存避免同一次打开目录把全部资源扫描两遍。
-  const now=Date.now(), cached=directoryListingCache.get(normalized);
-  if(cached && cached.expiresAt>now && cached.resourceCount===db.resources.length && cached.directoryCount===db.directories.length) return cached.value;
+  // 目录列表长期复用内存缓存；只有资源/文件夹数据发生管理变更时才主动清空。
+  const cached=directoryListingCache.get(normalized);
+  if(cached && cached.resourceCount===db.resources.length && cached.directoryCount===db.directories.length) return cached.value;
   const byDirectory=new Map();
   for(const r of db.resources) {
     if(r?.directoryId===undefined || r?.directoryId===null) continue;
@@ -5199,7 +5204,7 @@ function directoryListing(filter="all") {
     return count>0;
   }));
   const value={filter:normalized,counts,activeDirectories};
-  directoryListingCache.set(normalized,{value,expiresAt:now+300,resourceCount:db.resources.length,directoryCount:db.directories.length});
+  directoryListingCache.set(normalized,{value,resourceCount:db.resources.length,directoryCount:db.directories.length});
   if(directoryListingCache.size>3) directoryListingCache.delete(directoryListingCache.keys().next().value);
   return value;
 }
@@ -5446,6 +5451,7 @@ function indexResource(msg) {
     db.resources.unshift(item);
   }
   db.resources=db.resources.slice(0,MAX_RESOURCES);
+  invalidateDirectoryListingCache();
   const savedResource=db.resources.find(x=>x.chatId===item.chatId&&x.messageId===item.messageId) || item;
   queueResourceFolderTag(savedResource);
   queueBaserowResourceSync(savedResource);
