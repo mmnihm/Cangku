@@ -6623,6 +6623,42 @@ async function mainMessage(msg) {
   const t=msg.text||"";
   const rawText=String(msg.text||"").trim();
   const admin=isAdmin(uid);
+  // 管理员诊断指定会员群验证：/会员检测 或 /会员检测 用户ID
+  if(admin && /^\/会员检测(?:@\w+)?(?:\s+\d+)?$/i.test(rawText)) {
+    const targetMatch=rawText.match(/^\/会员检测(?:@\w+)?(?:\s+(\d+))?$/i);
+    const targetId=String(targetMatch?.[1]||uid);
+    const chatId=requiredGroupChatId();
+    if(!chatId) return sendHtml(TOKEN,uid,"<b>❌ 会员群未绑定或群 ID 缺失</b>\n请在正确的会员群内重新执行「/绑定指定群」。",adminMenu());
+    try {
+      const chat=await tg(TOKEN,"getChat",{chat_id:chatId});
+      const member=await tg(TOKEN,"getChatMember",{chat_id:chatId,user_id:Number(targetId)});
+      const status=String(member?.status||"unknown").toLowerCase();
+      const isMember=["creator","administrator","member"].includes(status)||(status==="restricted"&&member.is_member===true);
+      const botMe=await tg(TOKEN,"getMe",{});
+      let botStatus="未知";
+      try {
+        const botMember=await tg(TOKEN,"getChatMember",{chat_id:chatId,user_id:Number(botMe.id)});
+        botStatus=String(botMember?.status||"unknown");
+      } catch(e) { botStatus="查询失败："+String(e?.telegramDescription||e?.message||e); }
+      return sendHtml(TOKEN,uid,
+        "<b>🔎 会员群验证诊断</b>\n━━━━━━━━━━━━━━\n"+
+        "会员群："+escapeHtml(String(chat.title||group()?.title||chatId))+"\n"+
+        "群 ID：<code>"+escapeHtml(chatId)+"</code>\n"+
+        "检测用户：<code>"+escapeHtml(targetId)+"</code>\n"+
+        "用户状态：<b>"+escapeHtml(status)+"</b>\n"+
+        "会员判定："+(isMember?"✅ 通过":"❌ 未通过")+"\n"+
+        "机器人群内身份："+escapeHtml(botStatus)+"\n\n"+
+        (isMember?"该用户已被 Telegram 识别为会员，若仍受 3 个限制，请把此结果发给我。":"请检查群 ID 是否正确，以及用户是否仍在该群。"),
+        adminMenu());
+    } catch(e) {
+      return sendHtml(TOKEN,uid,
+        "<b>❌ 会员验证 API 查询失败</b>\n"+
+        "群 ID：<code>"+escapeHtml(chatId)+"</code>\n"+
+        "用户 ID：<code>"+escapeHtml(targetId)+"</code>\n"+
+        "错误："+escapeHtml(String(e?.telegramDescription||e?.message||e)).slice(0,700),
+        adminMenu());
+    }
+  }
   if(admin && /^\/exportdirectories(?:@\w+)?$/i.test(rawText)) {
     const directoryCount=(db.directories||[]).length;
     const resourceCount=(db.resources||[]).filter(r=>r?.fileType && !r?.textOnly && r?.chatId && Number(r?.messageId)>0).length;
