@@ -6574,7 +6574,6 @@ async function exportCangkuDirectories(uid) {
       title: String(r.title || "未命名资源").slice(0, 200),
       caption: String(r.caption || "").slice(0, 900),
       date: Number(r.date || 0), fileType: String(r.fileType),
-      mediaGroupId: String(r.mediaGroupId || ""),
       directoryId: r.directoryId == null ? null : String(r.directoryId),
       category: directory?.name || "未分类"
     };
