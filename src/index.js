@@ -3950,8 +3950,9 @@ async function allowed(token, userId) {
   const pending=(async()=>{
     try {
       const m = await tg(token, "getChatMember", {chat_id:chatId, user_id:Number(userId)});
-      const member=["creator","administrator","member"].includes(m.status) || (m.status === "restricted" && m.is_member === true);
-      membershipCache.set(cacheKey,{member,expiresAt:Date.now()+MEMBERSHIP_CACHE_TTL_MS});
+      const status=String(m?.status||"unknown").toLowerCase();
+      const member=["creator","administrator","member"].includes(status) || (status === "restricted" && m.is_member === true);
+      membershipCache.set(cacheKey,{member,status,expiresAt:Date.now()+MEMBERSHIP_CACHE_TTL_MS});
       if(membershipCache.size>5000) {
         const now=Date.now();
         for(const [key,value] of membershipCache) if(value.expiresAt<=now) membershipCache.delete(key);
@@ -3999,9 +4000,9 @@ async function refreshRequiredGroupMembership(token,userId) {
   const pending=(async()=>{
     try {
       const m=await tg(token,"getChatMember",{chat_id:chatId,user_id:Number(userId)});
-      const status=String(m?.status||"").toLowerCase();
+      const status=String(m?.status||"unknown").toLowerCase();
       const member=["creator","administrator","member"].includes(status) || (status==="restricted" && m.is_member===true);
-      membershipCache.set(cacheKey,{member,expiresAt:Date.now()+MEMBERSHIP_CACHE_TTL_MS});
+      membershipCache.set(cacheKey,{member,status,expiresAt:Date.now()+MEMBERSHIP_CACHE_TTL_MS});
       if(membershipCache.size>5000) {
         const now=Date.now();
         for(const [key,value] of membershipCache) if(value.expiresAt<=now) membershipCache.delete(key);
@@ -6631,9 +6632,10 @@ async function mainMessage(msg) {
     if(!chatId) return sendHtml(TOKEN,uid,"<b>❌ 会员群尚未绑定</b>\n请联系机器人管理员处理。",admin?adminMenu():undefined);
     try {
       const chat=await tg(TOKEN,"getChat",{chat_id:chatId});
-      const member=await tg(TOKEN,"getChatMember",{chat_id:chatId,user_id:Number(targetId)});
-      const status=String(member?.status||"unknown").toLowerCase();
-      const isMember=["creator","administrator","member"].includes(status)||(status==="restricted"&&member.is_member===true);
+      // 自助检测必须走统一刷新函数，确保检测结果同步写入权限缓存。
+      const isMember=await refreshRequiredGroupMembership(TOKEN,Number(targetId));
+      const cacheKey=tokenFingerprint(TOKEN)+":"+chatId+":"+String(targetId);
+      const status=String(membershipCache.get(cacheKey)?.status||"unknown").toLowerCase();
       const botMe=await tg(TOKEN,"getMe",{});
       let botStatus="未知";
       try {
