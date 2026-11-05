@@ -3268,6 +3268,13 @@ async function repositoryMigration(uid, sourceValue, targetValue) {
 const isSuperAdmin = id => ADMIN_IDS.has(String(id));
 const isAdmin = id => isSuperAdmin(id) || db.settings.admins.includes(String(id));
 const group = () => db.settings.requiredGroup;
+// 兼容旧版数据库中不同命名的会员群 ID 字段，统一转成 Telegram chat_id。
+function requiredGroupChatId() {
+  const g=group();
+  const value=g?.chatId ?? g?.chat_id ?? g?.groupId ?? g?.group_id ?? g?.id;
+  const chatId=String(value ?? "").trim();
+  return chatId || "";
+}
 const repo = () => db.settings.repository;
 
 /* CLOUD123_RUNTIME_V1 */
@@ -3929,8 +3936,12 @@ async function allowed(token, userId) {
   // 管理员、兑换获得的有效会员不受非会员额度限制。
   if (isAdmin(userId) || hasActivePremiumMembership(userId)) return true;
   const g = group();
-  if (!g) return false;
-  const cacheKey=tokenFingerprint(token)+":"+String(g.chatId)+":"+String(userId);
+  const chatId=requiredGroupChatId();
+  if (!g || !chatId) {
+    console.warn("⚠️ 指定会员群未正确绑定：requiredGroup 缺少有效 chatId");
+    return false;
+  }
+  const cacheKey=tokenFingerprint(token)+":"+chatId+":"+String(userId);
   const cached=membershipCache.get(cacheKey);
   if(cached && cached.expiresAt>Date.now()) return cached.member;
   if(cached) membershipCache.delete(cacheKey);
@@ -3938,7 +3949,7 @@ async function allowed(token, userId) {
   if(membershipPending.has(cacheKey)) return membershipPending.get(cacheKey);
   const pending=(async()=>{
     try {
-      const m = await tg(token, "getChatMember", {chat_id:g.chatId, user_id:userId});
+      const m = await tg(token, "getChatMember", {chat_id:chatId, user_id:Number(userId)});
       const member=["creator","administrator","member"].includes(m.status) || (m.status === "restricted" && m.is_member === true);
       membershipCache.set(cacheKey,{member,expiresAt:Date.now()+MEMBERSHIP_CACHE_TTL_MS});
       if(membershipCache.size>5000) {
@@ -3949,7 +3960,7 @@ async function allowed(token, userId) {
       return member;
     } catch(e) {
       // 查询失败不缓存 false，避免临时网络问题把会员误判为非会员 20 秒。
-      console.warn("⚠️ 指定群会员检查失败:", String(e?.telegramDescription || e?.message || e));
+      console.warn("⚠️ 指定群会员检查失败:", "group="+chatId, "user="+String(userId), String(e?.telegramDescription || e?.message || e));
       return false;
     } finally {
       membershipPending.delete(cacheKey);
@@ -3965,9 +3976,9 @@ function cachedRequiredGroupMembership(userId) {
 }
 // 只返回 Telegram 指定群的实际成员结果，不把兑换会员或管理员混算为黄金会员。
 function cachedActualRequiredGroupMembership(userId) {
-  const g=group();
-  if(!g?.chatId) return false;
-  const key=tokenFingerprint(TOKEN)+":"+String(g.chatId)+":"+String(userId);
+  const chatId=requiredGroupChatId();
+  if(!chatId) return false;
+  const key=tokenFingerprint(TOKEN)+":"+chatId+":"+String(userId);
   const cached=membershipCache.get(key);
   if(!cached || cached.expiresAt<=Date.now()) {
     if(cached) membershipCache.delete(key);
@@ -3976,26 +3987,30 @@ function cachedActualRequiredGroupMembership(userId) {
   return cached.member===true;
 }
 async function refreshRequiredGroupMembership(token,userId) {
-  const g=group();
-  if(!g?.chatId) return false;
-  const cacheKey=tokenFingerprint(token)+":"+String(g.chatId)+":"+String(userId);
-  const cached=membershipCache.get(cacheKey);
-  if(cached && cached.expiresAt>Date.now()) return cached.member===true;
-  if(cached) membershipCache.delete(cacheKey);
+  const chatId=requiredGroupChatId();
+  if(!chatId) {
+    console.warn("⚠️ 黄金会员群身份确认失败：未绑定有效会员群 ID");
+    return false;
+  }
+  const cacheKey=tokenFingerprint(token)+":"+chatId+":"+String(userId);
+  // /start 和个人中心属于用户主动刷新入口，不能直接返回旧的“非会员”缓存。
+  membershipCache.delete(cacheKey);
   if(membershipPending.has(cacheKey)) return membershipPending.get(cacheKey);
   const pending=(async()=>{
     try {
-      const m=await tg(token,"getChatMember",{chat_id:g.chatId,user_id:userId});
-      const member=["creator","administrator","member"].includes(m.status) || (m.status==="restricted" && m.is_member===true);
+      const m=await tg(token,"getChatMember",{chat_id:chatId,user_id:Number(userId)});
+      const status=String(m?.status||"").toLowerCase();
+      const member=["creator","administrator","member"].includes(status) || (status==="restricted" && m.is_member===true);
       membershipCache.set(cacheKey,{member,expiresAt:Date.now()+MEMBERSHIP_CACHE_TTL_MS});
       if(membershipCache.size>5000) {
         const now=Date.now();
         for(const [key,value] of membershipCache) if(value.expiresAt<=now) membershipCache.delete(key);
         while(membershipCache.size>5000) membershipCache.delete(membershipCache.keys().next().value);
       }
+      console.log("🔐 会员群身份刷新:", "group="+chatId, "user="+String(userId), "status="+status, "member="+member);
       return member;
     } catch(e) {
-      console.warn("⚠️ 黄金会员群身份确认失败:",String(e?.telegramDescription||e?.message||e));
+      console.warn("⚠️ 黄金会员群身份确认失败:", "group="+chatId, "user="+String(userId), String(e?.telegramDescription||e?.message||e));
       return false;
     } finally {
       membershipPending.delete(cacheKey);
